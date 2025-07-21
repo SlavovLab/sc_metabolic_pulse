@@ -1,4 +1,4 @@
-# Quantification of protein regulation across single cells from primary tissue
+# Single cell quantification of protein regulation in primary tissue
 
 sdf
 
