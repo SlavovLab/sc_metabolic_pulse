@@ -13,26 +13,25 @@ Outputs from each stage of analysis and processed gene by single cell and cell t
 
 ## Reproducing analysis
 
-### Overview of data processing steps
+### Overview of data processing scripts (numbered as in code directory)
 
+#### Preprocessing
 1. Preprocessing of single cell metabolic pulse data
 2. Integrating proteomics data and annotating cell types
 3. Calculating protein clearance rates accounting for amio acid recycling
 4. Accounting for missing data in computing cell type specific protein abundance
 5. Integrating mRNA and proteomics data
 
-### Overview of analysis
+#### Downstream analysis
 
 6. Analysis of factors explaining absolute protein concentrations within cell type and the influence of cell growth
-
 7. Analyis of influence of mRNA abundance, translation, and protein clearance on relative protein abundance across cell types.
-
 8. Single cell covariation analysis within cell type
     a. mRNA-Protein comparison
     b. Across cell type comparison
 
 
-### Instructions for reproducing analysis
+### Instructions for reproducing results
 
 #### If you want to reproduce only the downstream analysis 
 
