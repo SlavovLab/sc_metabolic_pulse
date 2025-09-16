@@ -1,7 +1,7 @@
 # Single cell quantification of protein regulation in primary tissue
 
 
-* [Project Website](https://decode.slavovlab.net) &nbsp; | &nbsp;
+* [Project Website](https://decode.slavovlab.net) &nbsp; 
 * [Preprint article](https://doi.org/10.1101/2024.08.26.609665)
 
 The code in this repository was used to quantify the regulation of protein abundance via transcription, translation, and protein clearance across cell types and single cells via integrated analysis of single cell in vivo metabolic pulse proteomics and singel cell mRNA sequencing. 
