@@ -57,7 +57,7 @@ Outputs from each stage of analysis and processed gene by single cell and cell t
 
 5. Run Scripts in order starting with 4 individual preprocessing scripts in folder 01 and save data outputs throughout each script
 
-6. After getting to 
+6. Run the remaining scripts in order saving intermediate files, will have to uncomment write.csv lines
 
 
 
