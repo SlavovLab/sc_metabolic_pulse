@@ -7,6 +7,20 @@ library(matrixStats)
 library(ComplexHeatmap)
 library(circlize)
 
+
+
+##################
+# data path
+##################
+
+path_dat <- '/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/dat/'
+
+mRNA_raw_path <- '/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/'
+
+#########################
+# Functions for analysis
+#########################
+
 TLS <- function(vect1,vect2){
   
   vect1[vect1 == -Inf] <- NA
@@ -37,13 +51,6 @@ TLS <- function(vect1,vect2){
   
 }
 
-
-#### Paths
-
-path_dat <- '/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/dat/'
-
-
-
 Proc_fasta <- function(path){
   convert_mouse <- read.fasta(path,set.attributes = T,whole.header = T)
   convert_mouse <- names(convert_mouse)
@@ -63,7 +70,12 @@ Proc_fasta <- function(path){
 }
 
 
-rna_seq <- readRDS('/Users/andrewleduc/Desktop/Senescense/seurat_integrated_filered_700_named.rds')
+
+#########################
+# Read in data for analysis
+#########################
+
+rna_seq <- readRDS(paste0(mRNA_raw_path,'seurat_integrated_filered_700_named.rds'))
 
 
 p_all <- read.csv(paste0(path_dat,'/04_Gene_X_SingleCell_and_annotations/sc_protein_relative.csv'),row.names = 1)
@@ -93,24 +105,27 @@ deg_mat = matrix(data = NA,nrow = nrow(convert_good),ncol = 7)
 mRNA_mat = matrix(data = NA,nrow = nrow(rna_seq@assays$RNA@counts),ncol = 7)
 
 
-
+# Make sure protein data is normalized
 p_all_min <- p_all
-
 p_all_min <- Normalize_reference_vector_log(p_all_min)
 
+
+# Information needed for the imputation, file from script 04_
 data_miss_post_collapse3 <- prot_imp_meta %>% filter(Protein %in% convert_good$split_prot)
 
+# get raw counts matrix
 mRNA_counts <- as.matrix(rna_seq@assays$RNA@counts)
 
-
+# These cells are not well resolved at protein level
 mRNA_meta <- mRNA_meta %>% filter(cell_type != 'Shwann')
+
+### This loop gets the cell type average (just frequentist empirical averages) for each modality in each cell type 
 for(i in 1:length(unique(mRNA_meta$cell_type))){
 
     um_plot_hold = um_plot %>% filter(Cell_Type == unique(mRNA_meta$cell_type)[i])
     mRNA_meta_hold = mRNA_meta %>% filter(cell_type == unique(mRNA_meta$cell_type)[i])
     
     mRNA_mat[,i] = (.1+ rowMeans(mRNA_counts[,rownames(mRNA_meta_hold)]))
-    
     
     data_miss_post_collapse_bas <- data_miss_post_collapse3 %>% filter(cell_type == unique(mRNA_meta$cell_type)[i])
     data_miss_post_collapse_bas <- data_miss_post_collapse_bas %>% filter(diff > 1)
@@ -122,16 +137,13 @@ for(i in 1:length(unique(mRNA_meta$cell_type))){
        p_all_min[data_miss_post_collapse_bas$Protein[j],intersect(colnames(p_all_min),um_plot_hold$ID)] <- prot_v
 
     }
-
     
     um_plot_hold <- um_plot_hold %>% filter(ID %in% colnames(p_all))
     prot_i <- rowMedians(p_all_min[convert_good$split_prot,um_plot_hold$ID],na.rm = T)
     prot_na <- prot_i
     prot_na[is.na(prot_na)==F]  <- 1
     prot_na[rowSums(is.na(p_all_min[convert_good$split_prot,um_plot_hold$ID])==F) < 4] <- NA
-    #prot_na_vect <- rowSums(is.na(p_all_min[convert_good$split_prot,rownames(um_plot_hold)])==F)#/nrow(um_plot_hold)
     prot_i = prot_i*prot_na
-    #protein_mat_NA[,i] = prot_na_vect
     protein_mat[,i] = prot_i
     
     
@@ -140,11 +152,12 @@ for(i in 1:length(unique(mRNA_meta$cell_type))){
     prot_na[is.na(prot_na)==F]  <- 1
     prot_na[rowSums(is.na(p_all_alpha[convert_good$split_prot,um_plot_hold$ID])==F) < 10] <- NA
     prot_i = prot_i*prot_na
-    #protein_mat_NA[,i] = prot_na_vect
     deg_mat[,i] = prot_i
 
     
 }
+
+# Format data matricies
 
 colnames(mRNA_mat) = unique(mRNA_meta$cell_type)
 colnames(protein_mat) = unique(mRNA_meta$cell_type)
@@ -159,6 +172,8 @@ mRNA_mat = mRNA_mat[,ordering]
 protein_mat = protein_mat[,ordering]
 deg_mat = deg_mat[,ordering]
 
+
+# NA values where clearance and translation not quantified
 protein_mat[is.na(deg_mat)==T] <- NA
 
 mRNA_mat_ <- mRNA_mat
@@ -174,6 +189,8 @@ protein_mat[protein_mat==-Inf] <- NA
 
 deg_mat <- Normalize_reference_vector_log(deg_mat)
 
+
+# Make translation matrix
 trans_mat <- protein_mat + deg_mat - mRNA_mat
 
 
@@ -182,6 +199,7 @@ write.csv(protein_mat,paste0(path_dat,'06_Gene_X_CellType/Relative_abundance/pro
 write.csv(mRNA_mat,paste0(path_dat,'06_Gene_X_CellType/Relative_abundance/mRNA_freq.csv'))
 write.csv(trans_mat,paste0(path_dat,'06_Gene_X_CellType/Relative_abundance/translation_freq.csv'))
 write.csv(deg_mat,paste0(path_dat,'06_Gene_X_CellType/Relative_abundance/clearance_freq.csv'))
+
 
 
 
@@ -195,7 +213,7 @@ cor_mat <- cor(
 
 
 
-# 2) Create the heatmap, printing correlation values in each square
+# Heatmap showing integration in figure 1
 Heatmap(
   cor_mat,
   name = "corr",
@@ -212,8 +230,26 @@ Heatmap(
     )
   }
 )
+Heatmap(
+  cor_mat,
+  name = "corr",
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red")),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    if (i == j) {
+      grid.text(
+        round(cor_mat[i, j], 2),  # show only diagonal values
+        x = x, y = y,
+        gp = gpar(fontsize = 10)
+      )
+    }
+  }
+)
 
-### Making scatter plots
+
+
+### Making scatter plots for supplemental figure 1
 
 ### Basal cells
 df_look <- data.frame(mrna = mRNA_mat[,1],prot = protein_mat[,1],deg = deg_mat[,2],
@@ -227,7 +263,6 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 ### Secratory cells
 df_look <- data.frame(mrna = mRNA_mat[,2],prot = protein_mat[,2],deg = deg_mat[,2],
                       gene = convert_good$split_prot)
-#df_look <- data.frame(mrna = mRNA_mat[sect,2],prot = data_miss_obs_test[sect,2]) 
 
 ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
   geom_abline(intercept = 0,slope = 1) + dot_plot + xlab('mRNA') + ylab('Protein')+
@@ -236,7 +271,6 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 ### Cilliated cells
 df_look <- data.frame(mrna = mRNA_mat[,3],prot = protein_mat[,3],deg = deg_mat[,3],
                       gene = convert_good$split_prot)
-#df_look <- data.frame(mrna = mRNA_mat[sect,3],prot = data_miss_obs_test[sect,3]) 
 
 ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
   #scale_color_gradient2(midpoint = median(df_look$deg,na.rm=T),high='red',low = 'blue')+
@@ -247,7 +281,6 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 ### Chondrocyte cells
 df_look <- data.frame(mrna = mRNA_mat[,4],prot = protein_mat[,4],deg = deg_mat[,4],
                       gene = convert_good$split_prot)
-#df_look <- data.frame(mrna = mRNA_mat[sect,4],prot = data_miss_obs_test[sect,4]) 
 
 ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
   geom_abline(intercept = 0,slope = 1) + dot_plot + xlab('mRNA') + ylab('Protein')+
@@ -257,7 +290,6 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 ### Fibroblast cells
 df_look <- data.frame(mrna = mRNA_mat[,5],prot = protein_mat[,5],deg = deg_mat[,5],
                       gene = convert_good$split_prot)
-#df_look <- data.frame(mrna = mRNA_mat[sect,5],prot = data_miss_obs_test[sect,5]) 
 
 ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
   #scale_color_gradient2(midpoint = median(df_look$deg,na.rm=T),high='red',low = 'blue')+
@@ -268,7 +300,6 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 ### Smooth muscle cells
 df_look <- data.frame(mrna = mRNA_mat[,6],prot = protein_mat[,6],deg = deg_mat[,6],
                       gene = convert_good$split_prot)
-#df_look <- data.frame(mrna = mRNA_mat[sect,6],prot = data_miss_obs_test[sect,6]) 
 
 ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
   geom_abline(intercept = 0,slope = 1) + dot_plot + xlab('mRNA') + ylab('Protein')+
@@ -278,7 +309,6 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 ### Immune cells
 df_look <- data.frame(mrna = mRNA_mat[,7],prot = protein_mat[,7],deg = deg_mat[,7],
                       gene = convert_good$split_prot)
-#df_look <- data.frame(mrna = mRNA_mat[sect,7],prot = data_miss_obs_test[sect,7]) 
 
 ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
   geom_abline(intercept = 0,slope = 1) + dot_plot + xlab('mRNA') + ylab('Protein')+
@@ -288,7 +318,7 @@ ggplot(df_look,aes(x = mrna,y = prot)) + geom_point()+
 
 
 
-#### Comparing Cell type slopes
+#### Comparing slopes of fold changes across Cell type 
 
 slopes <- c()
 cors <- c()
@@ -310,7 +340,7 @@ ggplot(df_plot, aes(x = correct,y = slopes))+ geom_boxplot(outliers = F)+geom_ji
 
 
 
-#### Comparing gene slopes
+#### Comparing slopes of fold changes across genes
 
 
 protein_mat_ <- protein_mat[rowSums(is.na(protein_mat)==F) > 4,]
@@ -354,109 +384,12 @@ ggplot(df_plot_gene, aes(fill = correct,x = slopes))+ geom_density(alpha = .2)  
   ggtitle('Across genes') + dot_plot + ylab('Genes') + xlab('Slopes') +scale_x_log10(limits = c(0.1, 3))
 
 
-View(df_plot_gene)
-
-hist(log2(slopes_gene))
 
 
 
 
 
 
-
-
-plt_gene <- data.frame(prot = protein_mat['Cavin1',],deg = -deg_mat['Cavin1',],mRNA = mRNA_mat['Cavin1',],cell_type = colnames(mRNA_mat))
-plt_long <- plt_gene %>%
-  pivot_longer(
-    cols      = c(prot, deg, mRNA),
-    names_to  = "modality",
-    values_to = "abundance"
-  ) %>%
-  mutate(
-    modality   = recode(modality, prot = "Protein", deg = "Deg",mRNA = 'mRNA'),
-    cell_type  = factor(cell_type, levels = unique(cell_type))   # preserve order
-  )
-
-# 2) dot‑and‑line plot
-ggplot(plt_long, aes(x = cell_type,
-                     y = abundance,
-                     group = modality,
-                     colour = modality)) +
-  geom_line() +
-  geom_point(size = 4) +
-  labs(
-    x = "Cell type",
-    y = "Relative abundance, log2",
-    colour = NULL,
-    title = "Hspa9"
-  ) +
-  theme_classic(base_size = 14) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  )+scale_color_manual(values = c('blue','#000','#ff7f0e'))+xlab('')
-
-View(cor_store_df)
-View(cor_store_df)
-cor_store_df = as.data.frame(cor_store)
-cor_store_df$slopes <- slopes_gene
-cor_store_df$prot_deg <- cor_store_prot_deg
-cor_store_df$trans_eff <- cor_store_trans_eff
-cor_store_df$var = var_store
-cor_store_df$deg_n <- na_deg
-cor_store_df$prot = rownames(mRNA_mat__)
-ggplot(cor_store_df, aes(x = cor_store)) + geom_histogram()+ dot_plot+
-  xlab('Protein X mRNA') +ylab('# Genes') + ggtitle('Accross cluster correlations')+
-  geom_vline(xintercept = median(cor_store_df$cor_store))
-
-median(cor_store_df$cor_store)
-
-View(cor_store_df)
-
-ggplot(cor_store_df, aes(x = log2(slopes_gene))) + geom_histogram()+ dot_plot+
-  xlab('Protein X mRNA') +ylab('# Genes') + ggtitle('Accross cluster log2(slopes)')
-
-
-cor_store_df <- cor_store_df %>% filter(deg_n > 2)
-#cor_store_df <- cor_store_df %>% filter(var > .5)
-
-ggplot(cor_store_df, aes(x = prot_deg)) + geom_histogram()+ dot_plot+
-  xlab('Protein abundance X Degradation') +ylab('# Genes') +  ggtitle('Accross cluster correlations')+
-  geom_vline(xintercept = median(cor_store_df$prot_deg)-.1)
-
-mean(cor_store_df$prot_deg)
-
-ggplot(cor_store_df, aes(x = trans_eff)) + geom_histogram()+ dot_plot+
-  xlab('Protein X Translation/mRNA') +ylab('# Genes') +  ggtitle('Accross cluster correlations')
-
-
-View(cor_store_df)
-
-cor_store_df <- cor_store_df %>% filter(is.na(prot_deg) == F)
-cor_store_df$prot_deg <- round(cor_store_df$prot_deg/4,digits = 1)*4
-cor_store_df$prot_deg <- factor(cor_store_df$prot_deg, levels = sort(unique(cor_store_df$prot_deg)))
-
-#cor_store_df <- cor_store_df %>% filter(var > .5)
-ggplot(cor_store_df, aes(x = prot_deg, y = cor_store)) +
-  geom_boxplot() +
-  stat_summary(fun.data = function(x) data.frame(y = max(x), label = length(x)),
-               geom = "text", vjust = -0.5, color = "blue") +
-  xlab('Protein X Deg. rate') +
-  ylab('Protein X mRNA') +
-  dot_plot  + ggtitle('Correlations')
-
-
-
-
-cor_store_df$trans_eff <- round(cor_store_df$trans_eff/4,digits = 1)*4
-cor_store_df$trans_eff <- factor(cor_store_df$trans_eff, levels = sort(unique(cor_store_df$trans_eff)))
-
-ggplot(cor_store_df, aes(x = trans_eff, y = cor_store)) +
-  geom_boxplot() +
-  stat_summary(fun.data = function(x) data.frame(y = max(x), label = length(x)),
-               geom = "text", vjust = -0.5, color = "blue") +
-  xlab('Protein X Translation efficiency') +
-  ylab('Protein X mRNA') +
-  dot_plot  + ggtitle('Correlations')
 
 
 

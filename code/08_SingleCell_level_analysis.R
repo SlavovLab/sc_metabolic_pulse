@@ -13,6 +13,40 @@ library(STRINGdb)
 library(igraph)
 library(purrr)
 library(matrixStats)
+library(tidyr)
+library(clusterProfiler) 
+library(msigdbr)
+library(org.Mm.eg.db);
+library(AnnotationDbi)
+library(GO.db)
+library(Hmisc)
+
+
+palette <- c(
+  Immune       = "#F90303",
+  Basal        = "#B50202",
+  Secratory    = "#B606C4",
+  Cilliated    = "#9B70F9",
+  Fibroblast   = "#2C78FF",
+  `Smooth muscle` = "#0498BA",
+  Chondrocyte  = "#03C1ED"
+)
+
+
+## Minimal enrichment with GO BP + Hallmark + Reactome
+
+
+##################
+# data path
+##################
+
+path_dat <- '/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/dat/'
+
+mRNA_raw_path <- '/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/'
+
+#########################
+# Functions for analysis
+#########################
 
 get_interact <- function(my_genes){
   
@@ -150,6 +184,186 @@ interaction_plot <- function(prot_mat,mrna_mat){
   return(df_cov_string2)
 }
 
+functional_heatmap_annotation <- function(mat1, mat2,gene_list){
+  
+  
+  hm_name = 'test'
+
+  
+  mat1 <- mat1[gene_list,]
+  mat2 <- mat2[gene_list,]
+  
+  cor_mat1 <- cor(t(mat1), method = "pearson",use = 'pairwise.complete.obs')
+  cor_mat1[is.na(cor_mat1)]<-0
+  cor_mat2 <- cor(t(mat2), method = "pearson",use = 'pairwise.complete.obs')
+  cor_mat2[is.na(cor_mat2)]<-0
+  
+  k <- 10  # number of clusters you want
+  
+  # 1) Cluster and make a non-overlapping order
+  hc <- hclust(as.dist(1 - cor_mat1), method = "average")
+  cl <- cutree(hc, k = k)                                # names = genes
+  ord_hc   <- hc$order
+  genes_hc <- rownames(cor_mat1)[ord_hc]
+  idx_by_cl <- split(seq_along(genes_hc), cl[genes_hc])
+  clus_ids  <- sort(as.integer(names(idx_by_cl)))
+  genes_ord <- unlist(lapply(clus_ids, function(i) genes_hc[idx_by_cl[[as.character(i)]]]),
+                      use.names = FALSE)
+  
+  cor_ord <- cor_mat1[genes_ord, genes_ord, drop = FALSE]
+  cl_fac  <- factor(cl[genes_ord], levels = clus_ids)
+  
+
+  
+  # 3) Compute block indices and outline with thin black lines
+  align_to <- split(seq_along(genes_ord), cl_fac)
+  
+  
+  
+  #### Get mRNA/Protein half half correlation heat map and plot boxes
+  cor_mat1 <- cor_mat1[genes_ord,genes_ord]
+  cor_mat2 <- cor_mat2[genes_ord,genes_ord]
+  diag(cor_mat1) <- NA
+  diag(cor_mat2) <- NA
+  
+  cor_mat1[upper.tri(cor_mat1,diag = T)] <- 0
+  cor_mat2[lower.tri(cor_mat2,diag = T)] <- 0
+  
+  ht <- Heatmap(cor_mat1+cor_mat2,
+          name = hm_name,
+          cluster_rows = FALSE, cluster_columns = FALSE,   # keep our non-overlap order
+          show_row_names = FALSE, show_column_names = FALSE)
+  
+
+  
+  ### Enrichment for gene cluster modules
+  
+  genes_by_cluster <- split(genes_ord, cl_fac)
+  
+
+  
+  ## Background/universe
+  bg <- if (exists("bg_symbols")) bg_symbols else unique(unlist(genes_by_cluster))
+  univ <- bitr(bg, "SYMBOL", "ENTREZID", org.Mm.eg.db) |> pull(ENTREZID) |> unique()
+  
+  ## Gene sets
+  H  <- msigdbr("Mus musculus", category = "H") |>
+    dplyr::select(term = gs_name, gene = entrez_gene)
+  RE <- msigdbr("Mus musculus", category = "C2", subcategory = "REACTOME") |>
+    dplyr::select(term = gs_name, gene = entrez_gene)
+  
+  ## GO BP TERM2GENE / TERM2NAME from OrgDb
+  go_map <- AnnotationDbi::select(org.Mm.eg.db, keys = univ, keytype = "ENTREZID",
+                                  columns = c("GOALL","ONTOLOGYALL")) |>
+    filter(ONTOLOGYALL == "BP") |>
+    transmute(term = GOALL, gene = ENTREZID) |>
+    distinct()
+  
+  go_name <- AnnotationDbi::select(GO.db::GO.db, keys = unique(go_map$term),
+                                   keytype = "GOID", columns = "TERM") |>
+    transmute(term = GOID, name = TERM) |>
+    distinct()
+  
+  enrich_one <- function(sym) {
+    g <- bitr(sym, "SYMBOL", "ENTREZID", org.Mm.eg.db) |> pull(ENTREZID) |> unique()
+    if (length(g) < 5) return(NULL)
+    list(
+      GO_BP = enricher(g, TERM2GENE = go_map, TERM2NAME = go_name,
+                       universe = univ, pAdjustMethod = "BH",
+                       minGSSize = 5, maxGSSize = 5000),
+      Hallmark = enricher(g, TERM2GENE = H,
+                          universe = univ, pAdjustMethod = "BH",
+                          minGSSize = 5, maxGSSize = 5000),
+      Reactome = enricher(g, TERM2GENE = RE,
+                          universe = univ, pAdjustMethod = "BH",
+                          minGSSize = 5, maxGSSize = 5000)
+    )
+  }
+  
+  res <- lapply(genes_by_cluster, enrich_one)
+  
+  top_terms <- lapply(names(res), function(cid) {
+    x <- res[[cid]]; if (is.null(x)) return(NULL)
+    bind_rows(
+      if (!is.null(x$GO_BP))   as_tibble(x$GO_BP@result)   |> mutate(source = "GO_BP")   else NULL,
+      if (!is.null(x$Hallmark))as_tibble(x$Hallmark@result)|> mutate(source = "Hallmark")else NULL,
+      if (!is.null(x$Reactome))as_tibble(x$Reactome@result)|> mutate(source = "Reactome")else NULL
+    ) |>
+      filter(!is.na(p.adjust)) |>
+      arrange(p.adjust) |>
+      slice_head(n = 5) |>
+      mutate(cluster = as.integer(cid))
+  }) |> bind_rows()
+  
+  return(list(top_terms,ht,hm_name,clus_ids,align_to,genes_ord))
+}
+
+add_heatmap_clusters <- function(hm_info){
+  
+  hm_name <- hm_info[[3]]
+  clus_ids <- hm_info[[4]]
+  align_to <- hm_info[[5]]
+  genes_ord <- hm_info[[6]]
+  
+  decorate_heatmap_body(hm_name, {
+    n <- length(genes_ord)
+    for (cid in clus_ids) {
+      idx <- align_to[[cid]]
+      y1 <- 1 - max(idx)/n; y2 <- 1 - (min(idx)-1)/n
+      x1 <- (min(idx)-1)/n; x2 <- max(idx)/n
+      # box (already drawn earlier, keep or remove)
+      grid.rect(x = unit((x1 + x2)/2, "npc"),
+                y = unit((y1 + y2)/2, "npc"),
+                width = unit(x2 - x1, "npc"),
+                height = unit(y2 - y1, "npc"),
+                gp = gpar(fill = NA, col = "black", lwd = 0.8))
+      # numeric label
+      
+    }
+  })
+}
+  
+Proc_fasta <- function(path){
+  convert_mouse <- read.fasta(path,set.attributes = T,whole.header = T)
+  convert_mouse <- names(convert_mouse)
+  parse_row<-grep("GN=",convert_mouse, fixed=T)
+  split_prot<-str_split(convert_mouse[parse_row], pattern = fixed("GN="))
+  gene<-unlist(split_prot)[seq(2,2*length(split_prot),2)]
+  prot <- unlist(split_prot)[seq(1,2*length(split_prot),2)]
+  prot_parse <- grep("|",prot, fixed=T)
+  gene_parse <- grep(" ",gene, fixed=T)
+  split_gene<-str_split(gene[parse_row], pattern = fixed(" "))
+  split_gene<-unlist(split_gene)[seq(1,3*length(split_gene),3)]
+  split_prot<-str_split(prot[parse_row], pattern = fixed("|"))
+  split_prot<-unlist(split_prot)[seq(2,3*length(split_prot),3)]
+  convert_mouse  <- as.data.frame(cbind(split_prot,split_gene))
+  
+  return(convert_mouse)
+}
+
+heat_map_clust_avg <- function(mat1,CT){
+  mat_make_fib <- matrix(data = NA,ncol = 2,nrow = 2)
+  colnames(mat_make_fib) <- c('Purple','Green')
+  rownames(mat_make_fib) <- c('Top','Bottom')
+  
+  mat_make_fib[1,1] <- cor(colMeans(mat1[convert_set1$split_gene,],na.rm = T),
+                           colMeans(mat1[intersect(rownames(a2)[1:158],rownames(mat1)),],na.rm = T),use = 'pairwise.complete.obs')
+  
+  mat_make_fib[2,1] <- cor(colMeans(mat1[convert_set1$split_gene,],na.rm = T),
+                           colMeans(mat1[intersect(rownames(a2)[159:nrow(a2)],rownames(mat1)),],na.rm = T),use = 'pairwise.complete.obs')
+  
+  
+  mat_make_fib[1,2] <- cor(colMeans(mat1[convert_set2$split_gene,],na.rm = T),
+                           colMeans(mat1[intersect(rownames(a2)[1:158],rownames(mat1)),],na.rm = T),use = 'pairwise.complete.obs')
+  
+  mat_make_fib[2,2] <- cor(colMeans(mat1[convert_set2$split_gene,],na.rm = T),
+                           colMeans(mat1[intersect(rownames(a2)[159:nrow(a2)],rownames(mat1)),],na.rm = T),use = 'pairwise.complete.obs')
+  
+  Heatmap(mat_make_fib,col=col_fun,cluster_rows = F,cluster_columns = F,column_title = CT)
+}
+
+
+
 
 # Single cell analysis
 ribo <- c("Rpl13" ,  "Rps11"  ,  "Rpl24"   ,  "Rps18"  ,  "Rpl6" ,
@@ -182,41 +396,22 @@ mito <- c("Hadhb",   "Acadvl",  "Hadha",   "Acadm",   "Acads",   "Acadl",   "Aca
           "Oat")
 
 
-### Path to data folder
-
-path_dat <- '/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/dat/'
 
 
-
-Proc_fasta <- function(path){
-  convert_mouse <- read.fasta(path,set.attributes = T,whole.header = T)
-  convert_mouse <- names(convert_mouse)
-  parse_row<-grep("GN=",convert_mouse, fixed=T)
-  split_prot<-str_split(convert_mouse[parse_row], pattern = fixed("GN="))
-  gene<-unlist(split_prot)[seq(2,2*length(split_prot),2)]
-  prot <- unlist(split_prot)[seq(1,2*length(split_prot),2)]
-  prot_parse <- grep("|",prot, fixed=T)
-  gene_parse <- grep(" ",gene, fixed=T)
-  split_gene<-str_split(gene[parse_row], pattern = fixed(" "))
-  split_gene<-unlist(split_gene)[seq(1,3*length(split_gene),3)]
-  split_prot<-str_split(prot[parse_row], pattern = fixed("|"))
-  split_prot<-unlist(split_prot)[seq(2,3*length(split_prot),3)]
-  convert_mouse  <- as.data.frame(cbind(split_prot,split_gene))
-  
-  return(convert_mouse)
-}
+#########################
+# Read in data for analysis
+#########################
 
 
-
-### Read in data
-
-rna_seq <- readRDS('/Users/andrewleduc/Desktop/Senescense/seurat_integrated_filered_700_named.rds')
-
+rna_seq <- readRDS(paste0(mRNA_raw_path,'seurat_integrated_filered_700_named.rds'))
 
 p_all <- read.csv(paste0(path_dat,'/04_Gene_X_SingleCell_and_annotations/sc_protein_relative.csv'),row.names = 1)
 p_all <- as.matrix(p_all)
 p_all_alpha <- read.csv(paste0(path_dat,'/04_Gene_X_SingleCell_and_annotations/clearance_relative.csv'),row.names = 1)
 p_all_alpha <- as.matrix(p_all_alpha)
+
+p_all_alpha_abs <- read.csv(paste0(path_dat,'/04_Gene_X_SingleCell_and_annotations/clearance_absolute.csv'),row.names = 1)
+p_all_alpha_abs <- as.matrix(p_all_alpha_abs)
 
 um_plot <- read.csv(paste0(path_dat,'/04_Gene_X_SingleCell_and_annotations/sc_protein_annotations.csv'),row.names = 1)
 mRNA_meta <- read.csv(paste0(path_dat,'/04_Gene_X_SingleCell_and_annotations/sc_mRNA_annotations.csv'),row.names = 1)
@@ -228,6 +423,8 @@ convert = Proc_fasta(paste0(path_dat,'Mouse.fasta'))
 
 convert = convert %>% filter(split_prot %in% rownames(p_all))
 convert = convert %>% filter(split_gene %in% rownames(rna_seq@assays$RNA$counts))
+
+convert_good$split_gene[1001:1455]
 
 convert_good <- convert %>% filter(split_prot %in% rownames(p_all_alpha))
 
@@ -255,6 +452,7 @@ mRNA_mat_sec = mRNA_norm[convert$split_gene,mRNA_meta$ID[mRNA_meta$cell_type == 
 
 um_plot_hold <- um_plot %>% filter(ID %in% colnames(p_all))
 
+
 um_plot_bas = um_plot_hold %>% filter(Cell_Type == 'Basal')
 um_plot_fib = um_plot_hold %>% filter(Cell_Type == 'Fibroblast')
 um_plot_chond = um_plot_hold %>% filter(Cell_Type == 'Chondrocyte')
@@ -269,60 +467,6 @@ rownames(prot_mat_chond) <- convert$split_gene
 prot_mat_sec <- p_all[convert$split_prot,um_plot_sec$ID]
 rownames(prot_mat_sec) <- convert$split_gene
 
-# p1_bas <- r1_5day_male@matricies@peptide ; colnames(p1_bas) <- paste0(colnames(p1_bas),'_prep1')
-# p1_bas <- p1_bas[,intersect(rownames(um_plot_bas),colnames(p1_bas))]
-# p2_bas <- r2_5day_female @matricies@peptide ; colnames(p2_bas) <- paste0(colnames(p2_bas),'_prep2')
-# p2_bas <- p2_bas[,intersect(rownames(um_plot_bas),colnames(p2_bas))]
-# p3_bas <- r3_10day_male@matricies@peptide ; colnames(p3_bas) <- paste0(colnames(p3_bas),'_prep3')
-# p3_bas <- p3_bas[,intersect(rownames(um_plot_bas),colnames(p3_bas))]
-# p4_bas <- r4_10day_female@matricies@peptide ; colnames(p4_bas) <- paste0(colnames(p4_bas),'_prep4')
-# p4_bas <- p4_bas[,intersect(rownames(um_plot_bas),colnames(p4_bas))]
-# 
-# p1_bas_deg <- r1_5day_male@miceotopes@Alpha_pep ; colnames(p1_bas_deg) <- paste0(colnames(p1_bas_deg),'_prep1')
-# p1_bas_deg <- p1_bas_deg[,intersect(rownames(um_plot_bas),colnames(p1_bas))]
-# p2_bas_deg <- r2_5day_female@miceotopes@Alpha_pep ; colnames(p2_bas_deg) <- paste0(colnames(p2_bas_deg),'_prep2')
-# p2_bas_deg <- p2_bas_deg[,intersect(rownames(um_plot_bas),colnames(p2_bas))]
-# p3_bas_deg <- r3_10day_male@miceotopes@Alpha_pep ; colnames(p3_bas_deg) <- paste0(colnames(p3_bas_deg),'_prep3')
-# p3_bas_deg <- p3_bas_deg[,intersect(rownames(um_plot_bas),colnames(p3_bas))]
-# p4_bas_deg <- r4_10day_female@miceotopes@Alpha_pep ; colnames(p4_bas_deg) <- paste0(colnames(p4_bas_deg),'_prep4')
-# p4_bas_deg <- p4_bas_deg[,intersect(rownames(um_plot_bas),colnames(p4_bas_deg))]
-# 
-# pep_all <- list(p1_bas, p2_bas, p3_bas, p4_bas) %>%
-#   purrr::map(~ .x %>%                       # each matrix
-#         as.data.frame() %>%          # -> data frame
-#         tibble::rownames_to_column("pep")) %>%   # peptide IDs become column "pep"
-#   purrr::reduce(dplyr::full_join, by = "pep") %>%      # outer join on that column
-#   tibble::column_to_rownames("pep") %>%          # move back to row names
-#   as.matrix()   
-# 
-# pep_map <- rbind(r1_5day_male@matricies@peptide_protein_map,
-#                  r2_5day_female@matricies@peptide_protein_map,
-#                  r3_10day_male@matricies@peptide_protein_map,
-#                  r4_10day_female@matricies@peptide_protein_map)
-# pep_all <- pep_all[rowSums(is.na(pep_all)==F) > 50,]
-# 
-# pep_map <- pep_map %>% distinct(seqcharge,.keep_all = T)
-# pep_map <- pep_map %>% filter(seqcharge %in% rownames(pep_all))
-# pep_map <- pep_map %>% left_join(convert, by = c('Protein'='split_prot'))
-# pep_map <- pep_map %>% filter(split_gene %in% rownames(prot_mat_bas))
-# sd_vals <- c()
-# genes <- c()
-# for(i in unique(pep_map$split_gene)){
-#   if(sum(pep_map$split_gene==i,na.rm = T) > 2){
-#     pep_map_hold <- pep_map %>% filter(split_gene == i)
-#     df_pep_hold <- pep_all[pep_map_hold$seqcharge,]
-#     obs_hold <- pairwiseCount(t(df_pep_hold))
-#     cor_hold <- cor(t(df_pep_hold),use = 'pairwise.complete.obs')
-#     obs_hold <- obs_hold[lower.tri(obs_hold)]
-#     cor_hold <- cor_hold[lower.tri(cor_hold)]
-#     cor_hold[obs_hold < 100] <- NA
-#     sd_vals <- c(sd_vals,mean(cor_hold,na.rm=T))
-#     genes <- c(genes,i)
-#   }
-# }
-# 
-# df_prot_noise <- data.frame(gene = genes,sds = sd_vals)
-# hist(df_prot_noise$sds)
 
 convert_deg <- convert %>% filter(split_prot %in% rownames(p_all_alpha))
 deg_mat_bas <- p_all_alpha[convert_deg$split_prot,um_plot_bas$ID]
@@ -345,9 +489,17 @@ mRNA_mat_chond <- mRNA_mat_chond[rownames(prot_mat_chond),]
 prot_mat_sec <- normalize_within_prep(prot_mat_sec,um_plot_sec)
 mRNA_mat_sec <- mRNA_mat_sec[rownames(prot_mat_sec),]
 
-plot(rowSds(mRNA_mat_bas,na.rm=T),rowSds(prot_mat_bas,na.rm=T),xlim = c(0,2.2),
-     ylim = c(0,2.2))
-abline(a=0,b=1)
+
+
+df_sd <- data.frame(mRNA = rowSds(mRNA_mat_bas,na.rm=T),protein = rowSds(prot_mat_bas,na.rm=T))
+ggplot(df_sd,aes(x = mRNA,y = protein)) + geom_point()+ xlim(c(0,2.2))+ ylim(c(0,2.2))+
+  theme_classic(base_size = 18) + geom_abline(intercept = 0,slope = 1)+
+  theme(
+    axis.line       = element_blank(),                 # strip the default axes
+    panel.border    = element_rect(                    # draw a new, even border
+      colour = "black", fill = NA, linewidth = 2
+    )
+  ) + xlab('Proteins') + ylab('mRNAs') + ggtitle('Dynamic range (Sd)')
 
 deg_mat_bas <- normalize_within_prep(deg_mat_bas,um_plot_bas)
 deg_mat_fib <- normalize_within_prep(deg_mat_fib,um_plot_fib)
@@ -378,12 +530,14 @@ df_cor_basal <-df_cor_basal %>% filter(!gene2 %in% ribo)
 df_cor_basal <-df_cor_basal %>% filter(!gene1 %in% mito)
 df_cor_basal <-df_cor_basal %>% filter(!gene2 %in% mito)  
 
+sum(df_cor_basal$cor_mRNA > .3)
+
 
 df_cor_basal_sub <- df_cor_basal[sample(nrow(df_cor_basal),60000),]
 
 cor(df_cor_basal_sub$cor_mRNA,df_cor_basal_sub$cor_prot,use = 'pairwise.complete.obs')
 
-ggplot(df_cor_basal,aes(x = cor_mRNA,y = cor_prot)) + ggpointdensity::geom_pointdensity()+
+ggplot(df_cor_basal_sub,aes(x = cor_mRNA,y = cor_prot)) + ggpointdensity::geom_pointdensity()+
   theme_bw(base_size = 18) + geom_abline(intercept = 0,slope = 1) + xlim(c(-.6,.8))+ ylim(c(-.6,.8))
 
 
@@ -392,6 +546,8 @@ ggplot(df_cor_basal,aes(x = cor_mRNA,y = cor_prot)) + ggpointdensity::geom_point
 
 df_cor_basal2 <- df_cor_basal %>% filter(abs(cor_prot) > .35)
 
+df_cor_basal2_rna <- df_cor_basal %>% filter(abs(cor_mRNA) > .2)
+length(unique(c(df_cor_basal2_rna$gene1,df_cor_basal2_rna$gene2)))
 
 df_cor_basal2$deg_cor <- NA
 df_cor_basal2$mRNA_avg <- NA
@@ -510,164 +666,41 @@ ggplot(null_df,aes(x = variable,y = value)) + geom_boxplot() + ylab('Correlation
 
 #### Making heatmap mRNA protein correlation modules
 
+df_cor_basal2 <- df_cor_basal %>% filter(abs(cor_prot) > .35)
+
+df_cor_basal2_rna <- df_cor_basal %>% filter(abs(cor_mRNA) > .2)
+length(unique(c(df_cor_basal2_rna$gene1,df_cor_basal2_rna$gene2)))
+
+look <- cor(t(prot_mat_bas[unique(c(df_cor_basal2$gene1,df_cor_basal2$gene2)),]),use = 'pairwise.complete.obs')
 cvm <- c()
 for(i in 1:ncol(look)){
   cvm <- c(cvm,sum(abs(look[,i]),na.rm=T))
 }
+hist(cvm)
 df_look <- data.frame(prot = colnames(look),mag = cvm)
-df_look <- df_look %>% filter(mag > 45)
-hist(df_look$mag)
+df_look <- df_look %>% filter(mag > 50)
 prot_mat_bas2 <- prot_mat_bas[rowSums(is.na(prot_mat_bas)==F) > 200,]
 df_look <- df_look %>% filter(prot %in% rownames(prot_mat_bas2))
 
 
-col_fun = colorRamp2(c(-.5,0, .5), c('blue',"white", "red"))
-
-
-cor_mat[is.na(cor_mat)]<-0
-cor_mat <- cor(t(prot_mat_bas[df_look$prot,]), method = "pearson",use = 'pairwise.complete.obs')
-
-ht <- Heatmap(
-  cor_ord, name = hm_name,
-  row_order = seq_len(nrow(cor_ord)),
-  column_order = seq_len(ncol(cor_ord)),
-  cluster_rows = FALSE, cluster_columns = FALSE,   # keep our non-overlap order
-  show_row_names = FALSE, show_column_names = FALSE
-)
-ht <- draw(ht)
-
-
-k <- 10  # number of clusters you want
-
-# 1) Cluster and make a non-overlapping order
-hc <- hclust(as.dist(1 - cor_mat), method = "average")
-cl <- cutree(hc, k = k)                                # names = genes
-ord_hc   <- hc$order
-genes_hc <- rownames(cor_mat)[ord_hc]
-idx_by_cl <- split(seq_along(genes_hc), cl[genes_hc])
-clus_ids  <- sort(as.integer(names(idx_by_cl)))
-genes_ord <- unlist(lapply(clus_ids, function(i) genes_hc[idx_by_cl[[as.character(i)]]]),
-                    use.names = FALSE)
-
-cor_ord <- cor_mat[genes_ord, genes_ord, drop = FALSE]
-cl_fac  <- factor(cl[genes_ord], levels = clus_ids)
-
-# 2) Plot with fixed order (no re-clustering), then draw thin black boxes
-hm_name <- "corr"
-ht <- Heatmap(
-  cor_ord, name = hm_name,
-  row_order = seq_len(nrow(cor_ord)),
-  column_order = seq_len(ncol(cor_ord)),
-  cluster_rows = FALSE, cluster_columns = FALSE,   # keep our non-overlap order
-  show_row_names = FALSE, show_column_names = FALSE
-)
-ht <- draw(ht)
-
-# 3) Compute block indices and outline with thin black lines
-align_to <- split(seq_along(genes_ord), cl_fac)
-
-cor_mat_mRNA <- cor(t(mRNA_mat_bas[df_look$prot,]), method = "pearson")
+prot_cor_mod <- functional_heatmap_annotation(prot_mat_bas,mRNA_mat_bas,df_look$prot)
+prot_cor_mod[[2]]
+add_heatmap_clusters(prot_cor_mod)
 
 
 
-#### Get mRNA/Protein half half correlation heat map and plot boxes
-cor_mat_prot <- cor_mat[genes_ord,genes_ord]
-cor_mat_mRNA <- cor_mat_mRNA[genes_ord,genes_ord]
-
-cor_mat_prot[upper.tri(cor_mat_prot,diag = T)] <- 0
-cor_mat_mRNA[lower.tri(cor_mat_mRNA,diag = T)] <- 0
-
-Heatmap(cor_mat_mRNA+cor_mat_prot,
-        name = hm_name,
-        cluster_rows = FALSE, cluster_columns = FALSE,   # keep our non-overlap order
-        show_row_names = FALSE, show_column_names = FALSE)
-
-
-decorate_heatmap_body(hm_name, {
-  n <- length(genes_ord)
-  for (cid in clus_ids) {
-    idx <- align_to[[cid]]
-    y1 <- 1 - max(idx)/n; y2 <- 1 - (min(idx)-1)/n
-    x1 <- (min(idx)-1)/n; x2 <- max(idx)/n
-    # box (already drawn earlier, keep or remove)
-    grid.rect(x = unit((x1 + x2)/2, "npc"),
-              y = unit((y1 + y2)/2, "npc"),
-              width = unit(x2 - x1, "npc"),
-              height = unit(y2 - y1, "npc"),
-              gp = gpar(fill = NA, col = "black", lwd = 0.8))
-    # numeric label
-  
-  }
-})
-
-### Enrichment for gene cluster modules
-
-genes_by_cluster <- split(genes_ord, cl_fac)
-
-## Minimal enrichment with GO BP + Hallmark + Reactome
-suppressPackageStartupMessages({
-  library(clusterProfiler); library(msigdbr); library(dplyr)
-  library(org.Mm.eg.db); library(AnnotationDbi); library(GO.db)
-})
-
-## Background/universe
-bg <- if (exists("bg_symbols")) bg_symbols else unique(unlist(genes_by_cluster))
-univ <- bitr(bg, "SYMBOL", "ENTREZID", org.Mm.eg.db) |> pull(ENTREZID) |> unique()
-
-## Gene sets
-H  <- msigdbr("Mus musculus", category = "H") |>
-  dplyr::select(term = gs_name, gene = entrez_gene)
-RE <- msigdbr("Mus musculus", category = "C2", subcategory = "REACTOME") |>
-  dplyr::select(term = gs_name, gene = entrez_gene)
-
-## GO BP TERM2GENE / TERM2NAME from OrgDb
-go_map <- AnnotationDbi::select(org.Mm.eg.db, keys = univ, keytype = "ENTREZID",
-                                columns = c("GOALL","ONTOLOGYALL")) |>
-  filter(ONTOLOGYALL == "BP") |>
-  transmute(term = GOALL, gene = ENTREZID) |>
-  distinct()
-
-go_name <- AnnotationDbi::select(GO.db::GO.db, keys = unique(go_map$term),
-                                 keytype = "GOID", columns = "TERM") |>
-  transmute(term = GOID, name = TERM) |>
-  distinct()
-
-enrich_one <- function(sym) {
-  g <- bitr(sym, "SYMBOL", "ENTREZID", org.Mm.eg.db) |> pull(ENTREZID) |> unique()
-  if (length(g) < 5) return(NULL)
-  list(
-    GO_BP = enricher(g, TERM2GENE = go_map, TERM2NAME = go_name,
-                     universe = univ, pAdjustMethod = "BH",
-                     minGSSize = 5, maxGSSize = 5000),
-    Hallmark = enricher(g, TERM2GENE = H,
-                        universe = univ, pAdjustMethod = "BH",
-                        minGSSize = 5, maxGSSize = 5000),
-    Reactome = enricher(g, TERM2GENE = RE,
-                        universe = univ, pAdjustMethod = "BH",
-                        minGSSize = 5, maxGSSize = 5000)
-  )
-}
-
-res <- lapply(genes_by_cluster, enrich_one)
-
-top_terms <- lapply(names(res), function(cid) {
-  x <- res[[cid]]; if (is.null(x)) return(NULL)
-  bind_rows(
-    if (!is.null(x$GO_BP))   as_tibble(x$GO_BP@result)   |> mutate(source = "GO_BP")   else NULL,
-    if (!is.null(x$Hallmark))as_tibble(x$Hallmark@result)|> mutate(source = "Hallmark")else NULL,
-    if (!is.null(x$Reactome))as_tibble(x$Reactome@result)|> mutate(source = "Reactome")else NULL
-  ) |>
-    filter(!is.na(p.adjust)) |>
-    arrange(p.adjust) |>
-    slice_head(n = 5) |>
-    mutate(cluster = as.integer(cid))
-}) |> bind_rows()
+rna_cor_mod <- functional_heatmap_annotation(mRNA_mat_bas,prot_mat_bas,unique(c(df_cor_basal2_rna$gene1,df_cor_basal2_rna$gene2)))
+rna_cor_mod[[2]]
+add_heatmap_clusters(rna_cor_mod)
 
 
 
 
 
-# Sec comparison
+############
+## Secratory comparison
+############
+
 cor_mat_sec_prot <- cor(t(prot_mat_sec),use = 'pairwise.complete.obs')
 cor_mat_sec_mRNA <- cor(t(mRNA_mat_sec))
 obs_mat_sec_prot <- pairwiseCount(t(prot_mat_sec))
@@ -719,8 +752,9 @@ deg_sec <- data.frame(HL2 = deg_abs_mat[,3],gene2 = rownames(deg_abs_mat))
 df_cor_sec <- df_cor_sec %>% left_join(deg_sec, by = c('gene2'))
 
 
-
+####################################
 # Fib comparison
+####################################
 cor_mat_fib_prot <- cor(t(prot_mat_fib),use = 'pairwise.complete.obs')
 cor_mat_fib_mRNA <- cor(t(mRNA_mat_fib)) 
 obs_mat_fib_prot <- pairwiseCount(t(prot_mat_fib))
@@ -791,7 +825,9 @@ plot(df_cor_fib$dif,log2(df_cor_fib$HL1+df_cor_fib$HL2))
 
 cor(df_cor_fib$dif,log2(df_cor_fib$HL1+df_cor_fib$HL2),use = 'pairwise.complete.obs')
 
+################################################
 # Chond comparison
+################################################
 cor_mat_chond_prot <- cor(t(prot_mat_chond),use = 'pairwise.complete.obs')
 cor_mat_chond_mRNA <- cor(t(mRNA_mat_chond))
 obs_mat_chond_prot <- pairwiseCount(t(prot_mat_chond))
@@ -840,11 +876,6 @@ ggplot(df_chond_deg_sub,aes(x = deg_cor,y = cor_prot)) + ggpointdensity::geom_po
 
 
 
-
-test_t <- rna_seq@assays$RNA@counts[rownames(prot_mat_bas),colnames(mRNA_mat_bas)]
-
-write.csv(test_t,file = "~/Desktop/Github/Sanity/bin/basal_counts.txt",quote = F) 
-
 sanity_basal <- read.delim('/Users/andrewleduc/Desktop/Github/Sanity/bin/sanity_out/log_transcription_quotients_vmax.txt')
 rownames(sanity_basal) <- rownames(prot_mat_bas)
 sanity_basal$GeneID <- NULL
@@ -878,30 +909,48 @@ df_prot_plot <- data.frame(
 b <- ggplot(df_prot_plot, aes(x = Cav1, y = Cavin1)) + geom_point(alpha = .5)+
   theme_classic(base_size = 15) + ggtitle('Protein')
 
-a+b
 
-sd(sanity_basal["Cav1", ] - mean(sanity_basal["Cav1", ]))
-sd(prot_mat_bas["Cav1", ]-mean(prot_mat_bas["Cav1", ],na.rm=T),na.rm=T)
 
-df_rna_plot <- data.frame(
-  value = c(sanity_basal["Cav1", ] - mean(sanity_basal["Cav1", ]),prot_mat_bas["Cav1", ]-mean(prot_mat_bas["Cav1", ],na.rm=T)) ,
-  type  = c(rep('mRNA',ncol(sanity_basal)),rep('prot',ncol(prot_mat_bas))))
 
-ggplot(df_rna_plot, aes(fill = type, x = value)) + geom_density(alpha = .3)+
-  theme_classic(base_size = 15) + ggtitle('Cav1') + scale_fill_manual(values = c('#F7941D','#00A651')) +
-  xlab('Concentrations')+ ylab('Density, single cells')
-
-sd(sanity_basal["Cavin1", ] - mean(sanity_basal["Cavin1", ]))
+sd(mRNA_mat_bas["Cavin1", ] - mean(mRNA_mat_bas["Cavin1", ]))
 sd(prot_mat_bas["Cavin1", ]-mean(prot_mat_bas["Cavin1", ],na.rm=T),na.rm=T)
 
 df_rna_plot <- data.frame(
-  value = c(sanity_basal["Cavin1", ] - mean(sanity_basal["Cavin1", ]),prot_mat_bas["Cavin1", ]-mean(prot_mat_bas["Cavin1", ],na.rm=T)) ,
-  type  = c(rep('mRNA',ncol(sanity_basal)),rep('prot',ncol(prot_mat_bas))))
+  value = c(mRNA_mat_bas["Cavin1", ] - mean(mRNA_mat_bas["Cavin1", ]),prot_mat_bas["Cavin1", ]-mean(prot_mat_bas["Cavin1", ],na.rm=T)) ,
+  type  = c(rep('mRNA',ncol(mRNA_mat_bas)),rep('prot',ncol(prot_mat_bas))))
 
 ggplot(df_rna_plot, aes(fill = type, x = value)) + geom_density(alpha = .3)+
   theme_classic(base_size = 15) + ggtitle('Cavin1')+ scale_fill_manual(values = c('#F7941D','#00A651'))+
   xlab('Concentrations') + ylab('Density, single cells')
 
+library(dplyr)
+library(ggplot2)
+
+# build centered vectors (drop NAs)
+v_m <- as.numeric(sanity_basal["Cavin1", ])
+v_p <- as.numeric(prot_mat_bas["Cavin1", ])
+df_rna_plot <- tibble(
+  value = c(v_m - mean(v_m, na.rm = TRUE),
+            v_p - mean(v_p, na.rm = TRUE)),
+  type  = c(rep("mRNA", length(v_m)),
+            rep("prot", length(v_p)))
+) %>% filter(!is.na(value))
+
+# rank within each type
+df_rank <- df_rna_plot %>%
+  group_by(type) %>%
+  arrange(value, .by_group = TRUE) %>%
+  mutate(rank = row_number(),
+         rank_pct = rank / n()) %>%
+  ungroup()
+
+ggplot(df_rank, aes(x = rank_pct, y = value, color = type, group = type)) +
+  geom_line(size = 1) +
+  geom_point(size = 1, alpha = 0.7) +
+  theme_classic(base_size = 15) +
+  ggtitle("Cavin1") +
+  scale_color_manual(values = c(mRNA = "#F7941D", prot = "#00A651")) +
+  xlab("Rank percentile") + ylab("Log2 fold change")
 
 
 
@@ -1100,44 +1149,48 @@ go_term_celltype_compute <- function(prot_mat_in,mRNA_mat_in,deg_mat_in = NULL){
 
 df_go_bas <- go_term_celltype_compute(prot_mat_in = prot_mat_bas,
                                     mRNA_mat_in = mRNA_mat_bas)
+df_go_bas$type <- 'Bas'
+
 
 df_go_bas2 <- df_go_bas %>% filter(qval_prot < .01 | qval_rna < .01 )
 df_go_bas2 <- df_go_bas2 %>% filter(prot > .1 | rna > .1)
-df_go_bas <- df_go_bas %>% dplyr::select('go','prot','rna')
-
-df_go_bas$type <- 'Bas'
+df_go_bas <- df_go_bas %>% dplyr::select('go','prot','rna','type')
 
 df_go_fib <- go_term_celltype_compute(prot_mat_in = prot_mat_fib,
                                     mRNA_mat_in = mRNA_mat_fib)
-
+df_go_fib$type <- 'Fib'
 df_go_fib2 <- df_go_fib %>% filter(qval_prot < .01 | qval_rna < .01 )
 df_go_fib2 <- df_go_fib2 %>% filter(prot > .1 | rna > .1)
-df_go_fib <- df_go_fib %>% dplyr::select('go','prot','rna')
-df_go_fib$type <- 'Fib'
+df_go_fib <- df_go_fib %>% dplyr::select('go','prot','rna','type')
+
 
 df_go_chond <- go_term_celltype_compute(prot_mat_in = prot_mat_chond,
                                       mRNA_mat_in = mRNA_mat_chond)
+df_go_chond$type <- 'Chond'
 
 df_go_chond2 <- df_go_chond %>% filter(qval_prot < .01 | qval_rna < .01 )
 df_go_chond2 <- df_go_chond2 %>% filter(prot > .1 | rna > .1)
+df_go_chond <- df_go_chond %>% dplyr::select('go','prot','rna','type')
 
-df_go_chond <- df_go_chond %>% dplyr::select('go','prot','rna')
 
-df_go_chond$type <- 'Chond'
 
 df_go_sec <- go_term_celltype_compute(prot_mat_in = prot_mat_sec,
                                         mRNA_mat_in = mRNA_mat_sec)
+df_go_sec$type <- 'Sec'
 df_go_sec2 <- df_go_sec%>% filter(qval_prot < .01 | qval_rna < .01 )
 df_go_sec2 <- df_go_sec2 %>% filter(prot > .1 | rna > .1)
-df_go_sec <- df_go_sec %>% dplyr::select('go','prot','rna')
+df_go_sec <- df_go_sec %>% dplyr::select('go','prot','rna','type')
 
-df_go_sec$type <- 'Sec'
 
 sect_go <- intersect(intersect(intersect(df_go_sec$go,df_go_chond$go),df_go_fib$go),df_go_bas$go)
 sect_go <- intersect(sect_go,unique(c(df_go_sec2$go,df_go_chond2$go,df_go_fib2$go,df_go_bas2$go)))
 
-
+View(df_go_chond2)
 df_go_all <- rbind(df_go_fib,df_go_sec,df_go_chond,df_go_bas)
+df_go_all2 <- rbind(df_go_fib2,df_go_sec2,df_go_chond2,df_go_bas2)
+write.csv(df_go_all2,'/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/dat/Supplemental_table2.csv')
+
+
 df_go_all <- df_go_all %>% filter(go %in% sect_go)
 df_go_all <- melt(df_go_all, ids = c('go','type'))
 df_go_all$tv <- paste0(df_go_all$type,'_',df_go_all$variable)
@@ -1171,21 +1224,55 @@ terms <- terms[!terms %in% c('positive regulation of ubiquitin-protein ligase ac
                              'proteasome core complex, alpha-subunit complex',
                              'intra-Golgi vesicle-mediated transport',
                              'endoplasmic reticulum-Golgi intermediate compartment membrane',
-                             'protein N-linked glycosylation via asparagine')]
+                             'protein N-linked glycosylation via asparagine',
+                             'retrograde vesicle-mediated transport, Golgi to ER',
+                             'oxidative phosphorylation',
+                             'tricarboxylic acid cycle','fatty acid beta-oxidation','peroxidase activity','cytochrome-c oxidase activity')]
 
 
+Heatmap(as.matrix(df_go_all)[,c(1,7,3,5)],cluster_rows = T,cluster_columns = T,col=col_fun)
 
 # Picking a limited set of go terms to display
 df_go_all2 <- as.matrix(df_go_all )
 df_go_all2 <- as.data.frame(df_go_all2)
-df_go_all2 <- df_go_all2 %>% filter(Bas_prot < .05)
-df_go_all2 <- df_go_all2 %>% filter(Chond_prot > .15)
-df_go_all2 <- df_go_all2 %>% filter(Fib_prot > .3)
-df_go_all2 <- df_go_all2 %>% filter(Sec_prot > .3)
+df_go_all2 <- df_go_all2 %>% filter(Bas_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Chond_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Fib_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Sec_prot > .15)
+
+terms <- rownames(df_go_all2)
+
+df_go_all2 <- as.matrix(df_go_all )
+df_go_all2 <- as.data.frame(df_go_all2)
+df_go_all2 <- df_go_all2 %>% filter(Bas_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Chond_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Fib_prot > .1)
+#df_go_all2 <- df_go_all2 %>% filter(Sec_prot < .1)
 
 terms <- c(terms,rownames(df_go_all2))
 terms <- unique(terms)
 
+df_go_all2 <- as.matrix(df_go_all )
+df_go_all2 <- as.data.frame(df_go_all2)
+df_go_all2 <- df_go_all2 %>% filter(Bas_prot >.2)
+#df_go_all2 <- df_go_all2 %>% filter(Chond_prot > .15)
+#df_go_all2 <- df_go_all2 %>% filter(Fib_prot > .3)
+#df_go_all2 <- df_go_all2 %>% filter(Sec_prot > .3)
+
+terms <- c(terms,rownames(df_go_all2))
+terms <- unique(terms)
+
+df_go_all2 <- as.matrix(df_go_all )
+df_go_all2 <- as.data.frame(df_go_all2)
+df_go_all2 <- df_go_all2 %>% filter(Bas_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Chond_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Fib_prot < .1)
+df_go_all2 <- df_go_all2 %>% filter(Sec_prot > .2)
+
+terms <- c(terms,rownames(df_go_all2))
+terms <- unique(terms)
+
+Heatmap(as.matrix(df_go_all)[terms,c(1,7,3,5)],cluster_rows = T,cluster_columns = T,col=col_fun)
 
 
 
@@ -1327,33 +1414,16 @@ terms <- unique(terms)
 ####################  KNN pseudo cell algo ###################### ######################  
 
 
-
-
-
 library(Matrix)
 library(FNN)          # fast k-nearest neighbours
-
-# 1 Cosine-similarity matrix in a fast-on-the-fly way 
-#   Use the top 1 000 most-variable genes to speed up neighbour search
-gvar <- rowVars(sanity_basal)
-top  <- order(gvar, decreasing = TRUE)
-Xtop <- t(sanity_basal)                  # cells × 1000 (row-major)
-
-
 library(Matrix)
 library(irlba)     # fast PCA
 library(ClusterR)  # kmeans++ (scales to >10k cells)
 
 
-
-
 k_clusters   <- 50          # number of pseudo-cell clusters
-top_var_genes <- 2000       # genes to use for PCA
 
-
-var_g   <- Matrix::rowVars(sanity_basal)
-top_idx <- order(var_g, decreasing = TRUE)[seq_len(top_var_genes)]
-X_top   <- t(sanity_basal)        # cells × genes (dense rows)
+X_top   <- t(mRNA_mat_bas)        # cells × genes (dense rows)
 
 
 set.seed(42)
@@ -1377,15 +1447,33 @@ pseudo_mat <- vapply(
   1:k_clusters,
   function(cl){
     idx <- which(cell_cluster == cl)
-    Matrix::rowMeans(sanity_basal[, idx, drop = FALSE])
+    Matrix::rowMeans(mRNA_mat_bas[, idx, drop = FALSE])
   },
-  numeric(nrow(sanity_basal))
+  numeric(nrow(mRNA_mat_bas))
 )
 
 colnames(pseudo_mat) <- paste0("pseudo_", sprintf("%02d", 1:k_clusters))
-rownames(pseudo_mat) <- rownames(sanity_basal)
+rownames(pseudo_mat) <- rownames(mRNA_mat_bas)
 
 
+cor_mat_bas_prot_test <- cor(t(prot_mat_bas),use = 'pairwise.complete.obs')
+cor_mat_bas_mRNA_test <- cor(t(pseudo_mat))
+obs_mat_bas_prot_test <- pairwiseCount(t(prot_mat_bas))
+idx <- which(lower.tri(cor_mat_bas_prot_test, diag = FALSE), arr.ind = TRUE)
+gene1 <- rownames(cor_mat_bas_prot_test)[idx[, 1]]   # first gene in the pair (row index)
+gene2 <- colnames(cor_mat_bas_prot_test)[idx[, 2]]   # second gene (column index)
+
+df_cor_basal <- data.frame(cor_prot = cor_mat_bas_prot_test[lower.tri(cor_mat_bas_prot_test)],
+                           cor_mRNA = cor_mat_bas_mRNA_test[lower.tri(cor_mat_bas_mRNA_test)],
+                           obs = obs_mat_bas_prot_test[lower.tri(obs_mat_bas_prot_test)],
+                           gene1 = gene1,gene2 = gene2)
+df_cor_basal <-df_cor_basal %>% filter(obs > 100 )
+df_cor_basal <-df_cor_basal %>% filter(!gene1 %in% ribo)
+df_cor_basal <-df_cor_basal %>% filter(!gene2 %in% ribo)   
+df_cor_basal <-df_cor_basal %>% filter(!gene1 %in% mito)
+df_cor_basal <-df_cor_basal %>% filter(!gene2 %in% mito)  
+
+cor(df_cor_basal$cor_prot,df_cor_basal$cor_mRNA)
 
 
 
@@ -1394,17 +1482,19 @@ rownames(pseudo_mat) <- rownames(sanity_basal)
 #################### Figure 5 #################### 
 
 
-a = Heatmap(cor(t(prot_mat_bas[intersect(rownames(prot_mat_bas),mito),]),use = 'pairwise.complete.obs'),
-        col = col_fun)
-
-intersect(rownames(prot_mat_bas),mito)[row_order(a)]
-
 
 sect <- intersect(rownames(prot_mat_bas),rownames(prot_mat_fib))
 #sect <- sect[!sect %in% c(mito,ribo)]
 
+
+
+
 cor_mat_bas_prot2 <- cor_mat_bas_prot[sect,sect]
 cor_mat_fib_prot2 <- cor_mat_fib_prot[sect,sect]
+
+
+
+
 
 diag(cor_mat_fib_prot2) <- NA
 diag(cor_mat_bas_prot2) <- NA
@@ -1414,18 +1504,15 @@ cor_null <- c()
 for(i in sect){
   
     cors <- c(cors,cor(cor_mat_fib_prot2[i,],cor_mat_bas_prot2[i,],use = 'pairwise.complete.obs'))
-    cor_null <- c(cor_null,cor(cor_mat_fib_prot2[sample(nrow(cor_mat_fib_prot2),1),],cor_mat_bas_prot2[sample(nrow(cor_mat_bas_prot2),1),],use = 'pairwise.complete.obs'))
+    v1 <- cor_mat_fib_prot2[sample(nrow(cor_mat_fib_prot2),1),]
+    v1_shuffled <- sample(v1)
+    v2 <- cor_mat_bas_prot2[sample(nrow(cor_mat_bas_prot2),1),]
+    cor_null <- c(cor_null,cor(v1_shuffled,v2,use = 'pairwise.complete.obs'))
 }
 
 df_cva <- data.frame(cor = cors,null_dist = cor_null,prot = sect)
 hist(cor_null)
 
-ggplot(df_cva,aes(x = cor))+ geom_histogram(fill = 'grey90',color = 'black') + theme_classic(base_size = 18)+
-  xlab('Correlations') + ylab('Proteins')
-
-library(tidyr)
-library(dplyr)
-library(ggplot2)
 
 # reshape to long --------------------------------------------------------------
 df_long <- df_cva %>%
@@ -1437,7 +1524,6 @@ df_long <- df_cva %>%
                        levels = c("null_dist", "cor"),
                        labels = c("Null", "Observed")))
 
-y_lab <- expression( cor( over(r, "\u2192")[fib] ,  over(r, "\u2192")[bas] ) )
 
 ggplot(df_long, aes(x = type, y = corr, fill = type)) +
   geom_violin(alpha = .2,trim = FALSE,
@@ -1447,21 +1533,25 @@ ggplot(df_long, aes(x = type, y = corr, fill = type)) +
   scale_fill_manual(values = c("Null" = "#ff7f0e", "Observed" = "#1f77b4"),
                     name = NULL) +
   labs(x = NULL,
-       y = y_lab,
+       y = 'Correlation vector corr',
        title = "") +
   theme_classic(base_size = 13) +
   theme(legend.position = "none") 
 
 
-df_cva_bad <- df_cva %>% filter(cor < .4)
+df_cva_bad <- df_cva %>% filter(cor < .1)
+df_cva_good <- df_cva %>% filter(cor > .4)
 
-df_cva <- df_cva %>% filter(cor > .4)
+df_cva$set <- NA
+df_cva$set[df_cva$prot %in% df_cva_bad$prot] <- 'Set2'
+df_cva$set[df_cva$prot %in% df_cva_good$prot] <- 'Set1'
+df_cva$null_dist <- NA
+write.csv(df_cva,'/Users/andrewleduc/Desktop/Github/Miceotoptes_single_cell/dat/Supplemental_table3.csv')
 
-nrow(df_cva)
 
-cm1 <- cor_mat_bas_prot2[df_cva$prot,df_cva$prot]
-cm2 <- cor_mat_fib_prot2[df_cva$prot,df_cva$prot]
-a <- Heatmap(cor_mat_bas_prot2[df_cva$prot,df_cva$prot])
+cm1 <- cor_mat_bas_prot2[df_cva_good$prot,df_cva_good$prot]
+cm2 <- cor_mat_fib_prot2[df_cva_good$prot,df_cva_good$prot]
+a <- Heatmap(cor_mat_bas_prot2[df_cva_good$prot,df_cva_good$prot])
 cm2 <- cm2[row_order(a),row_order(a)]
 cm1 <- cm1[row_order(a),row_order(a)]
 Heatmap(cm1,cluster_rows = F,cluster_columns = F)
@@ -1472,250 +1562,399 @@ cm2[lower.tri(cm2,diag = T)] <- 0
 Heatmap(cm1+cm2,cluster_rows = F,cluster_columns = F)
 
 
-cor3 <- c()
+test <- functional_heatmap_annotation(cor_mat_bas_prot2,cor_mat_fib_prot2,df_cva_good$prot)
+add_heatmap_clusters(test)
+View(test)
 
-df_wtf <- matrix(data = NA,nrow = length(df_cva_bad$prot),ncol = length(df_cva_bad$prot))
-rownames(df_wtf) <- df_cva_bad$prot
-colnames(df_wtf) <- df_cva_bad$prot
 
-for(i in 1:length(df_cva_bad$prot)){
-  for(j in 1:length(df_cva_bad$prot)){
-    df_wtf[i,j] <- cor(cor_mat_bas_prot2[df_cva$prot,df_cva_bad$prot[i]],cor_mat_fib_prot2[df_cva$prot,df_cva_bad$prot[j]],use = 'pairwise.complete.obs')
+G1 <- df_cva_good$prot        # proteins that form the fingerprint (rows)
+G2 <- df_cva_bad$prot    # proteins you compare across cell types (cols)
+
+cor_mat_bas_prot2[is.na(cor_mat_bas_prot2)] <- 0
+cor_mat_fib_prot2[is.na(cor_mat_fib_prot2)] <- 0
+
+cor_mat_bas_prot3 <- cor_mat_bas_prot2[G1,G2]
+cor_mat_fib_prot3 <- cor_mat_fib_prot2[G1,G2]
+
+
+a <- Heatmap(cor_mat_fib_prot3,show_row_names = F,show_column_names = F,show_row_dend = F,show_column_dend = F)
+a2 <- cor_mat_fib_prot3[row_order(a),column_order(a)]
+b <- Heatmap(cor_mat_bas_prot3[row_order(a),column_order(a)],cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F)
+b2 <- cor_mat_bas_prot3[row_order(a),column_order(a)]
+
+
+top_half_bas <- c()
+top_half_fib <- c()
+bot_half_fib <- c()
+bot_half_fib <- c()
+for(i in 1:ncol(a2)){
+  
+  top_half_bas <- c(top_half_bas,median(a2[1:158,i],na.rm = T)-median(a2[159:nrow(a2),i],na.rm = T))
+  top_half_fib <- c(top_half_fib,median(b2[1:158,i],na.rm = T)-median(b2[159:nrow(a2),i],na.rm = T))
+  #bot_half_fib <- c(bot_half_fib,)
+  #bot_half_fib <- c(bot_half_fib,)
+  
+}
+
+df_look <- data.frame(bas = top_half_bas,fib = top_half_fib,gene = colnames(a2))
+df_look <- df_look %>%
+  filter(abs(fib) > .05, abs(bas) > .05) %>%
+  filter(sign(fib) != sign(bas))
+
+
+a2 <- a2[,colnames(a2) %in% df_look$gene]
+b2 <- b2[,colnames(b2) %in% df_look$gene]
+
+a2_rna <- cor_mat_bas_mRNA[rownames(a2),colnames(a2)]
+b2_rna <- cor_mat_fib_mRNA[rownames(a2),colnames(a2)]
+
+cor_mat_bas_deg <- cor(t(deg_mat_bas),use = 'pairwise.complete.obs')
+cor_mat_fib_deg <- cor(t(deg_mat_fib),use = 'pairwise.complete.obs')
+
+a2_row <- rownames(a2)[rownames(a2) %in% rownames(cor_mat_bas_deg)]
+a2_col <- colnames(a2)[colnames(a2) %in% rownames(cor_mat_bas_deg)]
+a2_row <- a2_row[a2_row %in% rownames(cor_mat_fib_deg)]
+a2_col <- a2_col[a2_col %in% rownames(cor_mat_fib_deg)]
+
+a2_deg <- cor_mat_bas_deg[a2_row,a2_col]
+b2_deg <- cor_mat_fib_deg[a2_row,a2_col]
+
+col_fun = colorRamp2(c(-.4,0,.4), c("blue","white", "red"))
+Heatmap(a2,cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F,col = col_fun)
+
+Heatmap(b2,cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F,col = col_fun)
+
+Heatmap(a2_rna,cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F,col = col_fun)
+
+Heatmap(b2_rna,cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F,col = col_fun)
+
+Heatmap(a2_deg,cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F,col = col_fun)
+
+Heatmap(b2_deg,cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F,col = col_fun)
+
+
+
+look <- cor(cor_mat_bas_prot2,cor_mat_bas_prot2,use = 'pairwise.complete.obs')
+
+a <- Heatmap(cor(cor_mat_fib_prot3,cor_mat_fib_prot3,use = 'pairwise.complete.obs'),show_row_names = F,show_column_names = F,show_row_dend = F,show_column_dend = F)
+a
+Heatmap(cor(cor_mat_bas_prot3,cor_mat_bas_prot3,use = 'pairwise.complete.obs')[row_order(a),column_order(a)],cluster_rows = F,cluster_columns = F,
+        show_row_names = F,show_column_names = F)
+
+
+
+enrich_terms_debug <- function(genes_up_symbols,
+                               background_symbols = NULL,
+                               species = c("mouse","human"),
+                               min_set_size = 5,
+                               p_adj_cutoff = 1,   # start lenient; filter later
+                               verbose = TRUE) {
+  species <- match.arg(species)
+  if (species == "mouse") {
+    OrgDb <- org.Mm.eg.db; kegg_org <- "mmu"; react_org <- "mouse"
+  } else {
+    OrgDb <- org.Hs.eg.db; kegg_org <- "hsa"; react_org <- "human"
   }
-}
-
-
-
-diff_fib <- c()
-diff_bas <- c()
-bas_prot <- c()
-fib_prot <- c()
-for(i in 1:nrow(df_wtf)){
-  diff_bas <- c(diff_bas,max(df_wtf[i,]) - diag(df_wtf)[i])
-  bas_prot <- c(bas_prot,names(which(df_wtf[i,]==max(df_wtf[i,]))))
-  diff_fib <- c(diff_fib,max(df_wtf[,i]) - diag(df_wtf)[i])
-  fib_prot <- c(fib_prot,names(which(df_wtf[,i]==max(df_wtf[,i]))))
-}
-df_diff <-data.frame(diff = diff_bas,max_bas =bas_prot , prot = rownames(df_wtf))
-
-cor_mat_bas_prot['Acot2',colnames(df_wtf)]
-
-plot(df_wtf[,'Acot2'],df_wtf['Cyb5r3',])
-
-cor_mat_bas_prot2['Cyb5r3',df_cva$prot]
-cor_mat_fib_prot2['Acot2',df_cva$prot]
-
-# ── libraries ──────────────────────────────────────────────────────────────
-suppressPackageStartupMessages({
-  library(dplyr);  library(tidyr);     library(ggplot2)
-  library(clusterProfiler);  library(AnnotationDbi);  library(GO.db)
-  library(org.Mm.eg.db)              # ↔ org.Hs.eg.db + species="Homo sapiens" if human
-})
-
-species <- "Mus musculus"   # change if human
-OrgDb   <- org.Mm.eg.db
-cutoff  <- 0.20             # correlation threshold
-fdr_thr <- 0.01             # significance cut-off for plotting set 3 & 4
-
-# ── 1) four gene SYMBOL vectors ────────────────────────────────────────────
-set_syms <- list(
-  "Cyb5r3 | Fibro" = names(which(cor_mat_fib_prot2["Cyb5r3", ] >= cutoff)),
-  "Acot2  | Basal" = names(which(cor_mat_bas_prot2["Acot2",  ] >= cutoff)),
-  "Acot2  | Fibro" = names(which(cor_mat_fib_prot2["Acot2",  ] >= cutoff)),
-  "Cyb5r3 | Basal" = names(which(cor_mat_bas_prot2["Cyb5r3", ] >= cutoff))
-)
-
-# background = all proteins you quantified
-bg_sym <- rownames(cor_mat_fib_prot2)
-sym2ent <- bitr(bg_sym, "SYMBOL", "ENTREZID", OrgDb) %>% distinct()
-universe <- sym2ent$ENTREZID
-
-# GO-BP TERM2GENE / TERM2NAME (restricted to universe)
-go_map <- AnnotationDbi::select(
-  OrgDb, keys = universe, keytype = "ENTREZID",
-  columns = c("GOALL","ONTOLOGYALL")
-) %>%
-  filter(ONTOLOGYALL == "BP") %>%
-  transmute(term = GOALL, gene = ENTREZID) %>%
-  distinct()
-
-go_name <- AnnotationDbi::select(
-  GO.db::GO.db, keys = unique(go_map$term),
-  keytype = "GOID", columns = "TERM"
-) %>%
-  transmute(term = GOID, name = TERM) %>%
-  distinct()
-
-# helper to run ORA -------------------------------------------------------
-run_go <- function(sym_vec) {
-  ent <- unique(na.omit(sym2ent$ENTREZID[match(sym_vec, sym2ent$SYMBOL)]))
-  if (length(ent) < 5) return(tibble())     # too few genes → empty
-  as_tibble(
-    enricher(ent, TERM2GENE = go_map, TERM2NAME = go_name,
-             universe = universe, pAdjustMethod = "BH",
-             minGSSize = 5, maxGSSize = 5000
-    )@result
-  )
-}
-
-go_list <- lapply(set_syms, run_go)
-
-# ── 2) terms common to set 1 & set 2 ───────────────────────────────────────
-
-
-g1 <- go_list[[1]] %>% filter(p.adjust < .01)
-g2 <- go_list[[2]] %>% filter(p.adjust < .01)
-sect <- intersect(g1$ID,g2$ID)
-
-g1 <- g1 %>% filter(ID %in% sect)
-g2 <- g2 %>% filter(ID %in% sect)
-g3 <- go_list[[3]] %>% filter(ID %in% sect)
-g4 <- go_list[[4]] %>% filter(ID %in% sect)
-
-
-sets <- list(
-  `Cyb5r3 | Fibro` = g1,
-  `Acot2  | Basal` = g2,
-  `Acot2  | Fibro` = g3,
-  `Cyb5r3 | Basal` = g4
-)
-
-common_ids <- sect                           # already computed
-
-# helper: add missing rows with p = 1, Count = 0
-fill_missing <- function(df, set_name) {
-  df <- df %>% filter(ID %in% common_ids)    # keep only common terms
-  missing <- setdiff(common_ids, df$ID)
-  if (length(missing)) {
-    df_missing <- tibble(
-      ID          = missing,
-      Description = go_list[[1]]$Description[match(missing, go_list[[1]]$ID)],
-      p.adjust    = 1,
-      Count       = 0
+  
+  map_syms <- function(x) {
+    suppressMessages(
+      AnnotationDbi::select(OrgDb, keys = unique(x),
+                            keytype = "SYMBOL", columns = "ENTREZID") |>
+        distinct(SYMBOL, ENTREZID) |>
+        filter(!is.na(ENTREZID))
     )
-    df <- bind_rows(df, df_missing)
   }
-  df$set <- set_name
-  df
+  
+  up_map <- map_syms(genes_up_symbols)
+  up_entrez <- unique(up_map$ENTREZID)
+  
+  if (is.null(background_symbols)) {
+    bg_syms <- keys(OrgDb, keytype = "SYMBOL")
+  } else {
+    bg_syms <- unique(background_symbols)
+  }
+  bg_map <- map_syms(bg_syms)
+  bg_entrez <- unique(bg_map$ENTREZID)
+  
+  if (verbose) {
+    message(sprintf("Mapped %d/%d up-regulated symbols to Entrez.",
+                    length(up_entrez), length(unique(genes_up_symbols))))
+    message(sprintf("Background mapped: %d/%d symbols.",
+                    length(bg_entrez), length(bg_syms)))
+  }
+  if (length(up_entrez) < min_set_size && verbose) {
+    message("Warning: up list smaller than min_set_size; consider lowering min_set_size.")
+  }
+  
+  tidy_enrich <- function(x) {
+    if (inherits(x, "enrichResult") || inherits(x, "gseaResult")) {
+      df <- as.data.frame(x) |> tibble::as_tibble()
+      # Some versions don’t populate 'qvalue'; avoid filtering on missing column.
+      if (!"qvalue" %in% names(df)) df$qvalue <- NA_real_
+      df
+    } else tibble::tibble()
+  }
+  
+  maybe_simplify <- function(er) {
+    df <- tidy_enrich(er)
+    if (nrow(df) == 0) return(df)
+    # only simplify if there are rows
+    er2 <- tryCatch(simplify(er, OrgDb = OrgDb, by = "p.adjust",
+                             cutoff = 0.7, select_fun = min),
+                    error = function(e) er)
+    tidy_enrich(er2)
+  }
+  
+  do_go <- function(ont) {
+    er <- tryCatch(
+      enrichGO(gene = up_entrez, universe = bg_entrez,
+               OrgDb = OrgDb, keyType = "ENTREZID", ont = ont,
+               pAdjustMethod = "BH",
+               pvalueCutoff = 1, qvalueCutoff = 1,
+               minGSSize = min_set_size, readable = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(er)) return(tibble::tibble())
+    maybe_simplify(er) |>
+      filter(Count >= min_set_size, p.adjust <= p_adj_cutoff)
+  }
+  
+  go_bp <- do_go("BP"); go_mf <- do_go("MF"); go_cc <- do_go("CC")
+  
+  kegg <- tryCatch({
+    enrichKEGG(gene = up_entrez, organism = kegg_org,
+               pvalueCutoff = 1, pAdjustMethod = "BH", qvalueCutoff = 1) |>
+      setReadable(OrgDb, keyType = "ENTREZID") |>
+      tidy_enrich() |>
+      filter(Count >= min_set_size, p.adjust <= p_adj_cutoff)
+  }, error = function(e) tibble::tibble())
+  
+  react <- tryCatch({
+    enrichPathway(gene = up_entrez, organism = react_org,
+                  pvalueCutoff = 1, pAdjustMethod = "BH",
+                  qvalueCutoff = 1, minGSSize = min_set_size,
+                  readable = TRUE) |>
+      tidy_enrich() |>
+      filter(Count >= min_set_size, p.adjust <= p_adj_cutoff)
+  }, error = function(e) tibble::tibble())
+  
+  if (verbose) {
+    message(sprintf("GO_BP rows: %d | GO_MF: %d | GO_CC: %d | KEGG: %d | Reactome: %d",
+                    nrow(go_bp), nrow(go_mf), nrow(go_cc), nrow(kegg), nrow(react)))
+  }
+  
+  list(GO_BP = go_bp, GO_MF = go_mf, GO_CC = go_cc,
+       KEGG = kegg, Reactome = react,
+       mapped_up = up_map, mapped_bg = bg_map)
 }
 
-plot_df <- bind_rows(Map(fill_missing, sets, names(sets)))
-
-## convert to plotting aesthetics ----------------------------------------------
-plot_df <- plot_df %>%
-  mutate(logFDR = -log10(p.adjust),
-         Description = factor(Description, levels =
-                                rev(unique(Description[order(logFDR)]))))
-
-## Dot-plot ---------------------------------------------------------------------
-
-plot_df$set[plot_df$set == "Cyb5r3 | Fibro"] <- " Cyb5r3 | Fibro"
-ggplot(plot_df,
-       aes(y = set, x = Description,
-           colour = logFDR, size = Count)) +
-  geom_point() +
-  scale_colour_viridis_c(option = "plasma",
-                         name   = "−log10(FDR)",
-                         limits = c(0, max(plot_df$logFDR)),
-                         oob    = scales::squish) +
-  scale_size(range = c(2, 7), name = "Overlap\n(count)") +
-  labs(x = NULL, y = NULL,
-       title = "Shared GO-BP terms across Cyb5r3 / Acot2 correlation sets") +
-  theme_classic(base_size = 12) +
-  theme(axis.text.y = element_text(size = 9),
-        axis.text.x = element_text(angle = 35, hjust = 1))
 
 
+test <- enrich_terms_from_set(colnames(a2)[25:ncol(a2)],background_symbols = rownames(cor_mat_bas_prot),
+                              species = 'mouse')
+
+
+# ----- your two sets -----
+set_fib <- c("Glud1","Sfxn3","Dpysl3","Ptgis","Ugdh","Ugp2","Uap1l1","Rras","Ephx1","Parva",
+             "Tram1","Hsd17b4","Rsu1","Epb41l2","Cnpy2","Ehd1","Uso1","Lman1","Erp44","Dad1",
+             "Rcn3","Prkcsh","Sparc","Lypla1","Flot2","Sntb2","Lmnb2","Dpm1","Actn1","Galk1","Ftl1")
+
+set_bas <- c("Dsp","Sec14l2","Ybx1","Rpl14","Trim28","Hnrnpa1","Agr2","Snu13","Fkbp4","Hmgb2",
+             "Rnpep","Ces2c","Gsto1","Aldh1a1","Acot2","Fasn","Crocc","Tpm1","Krt15","Krt5",
+             "Cndp2","Cotl1","Npepps","Dbi")
+
+convert_set1 <- convert %>% filter(split_gene %in% set_fib)
+convert_set1 <- convert_set1 %>% filter(split_gene %in% rownames(deg_mat_bas))
+convert_set1 <- convert_set1 %>% filter(split_gene %in% rownames(deg_mat_fib))
+
+convert_set2 <- convert %>% filter(split_gene %in% set_bas)
+convert_set2 <- convert_set2 %>% filter(split_gene %in% rownames(deg_mat_bas))
+convert_set2 <- convert_set2 %>% filter(split_gene %in% rownames(deg_mat_fib))
+
+deg_mat_bas_norm <- Normalize_reference_vector(deg_mat_bas,log = T)
+deg_mat_fib_norm <- Normalize_reference_vector(deg_mat_fib,log = T)
+
+cor_bas_set1 <- c()
+cor_fib_set1 <- c()
+for(i in 1:nrow(convert_set1)){
+  prot <- convert_set1$split_gene[i]
+  cor_bas_set1 <- c(cor_bas_set1,cor(deg_mat_bas[prot,],prot_mat_bas[prot,],use = 'pairwise.complete.obs'))
+  cor_fib_set1 <- c(cor_fib_set1,cor(deg_mat_fib[prot,],prot_mat_fib[prot,],use = 'pairwise.complete.obs'))
+}
+cor_bas_set2 <- c()
+cor_fib_set2 <- c()
+for(i in 1:nrow(convert_set2)){
+  prot <- convert_set2$split_gene[i]
+  cor_bas_set2 <- c(cor_bas_set2,cor(deg_mat_bas[prot,],prot_mat_bas[prot,],use = 'pairwise.complete.obs'))
+  cor_fib_set2 <- c(cor_fib_set2,cor(deg_mat_fib[prot,],prot_mat_fib[prot,],use = 'pairwise.complete.obs'))
+}
+df_fib_make <- data.frame(cors = c(cor_fib_set1,cor_fib_set2),
+                          set = c(rep('set1',length(cor_fib_set1)),rep('set2',length(cor_fib_set2))))
+
+ggplot(df_fib_make,aes(x = set,y = cors))+ geom_boxplot() + coord_cartesian(ylim = c(-.25,.25))
+
+df_bas_make <- data.frame(cors = c(cor_bas_set1,cor_bas_set2),
+                          set = c(rep('set1',length(cor_fib_set1)),rep('set2',length(cor_fib_set2))))
+
+ggplot(df_bas_make,aes(x = set,y = cors))+ geom_boxplot()+ coord_cartesian(ylim = c(-.25,.25))
+
+
+mat_make_bas <- matrix(data = NA,ncol = 2,nrow = 2)
+colnames(mat_make_bas) <- c('Purple','Green')
+rownames(mat_make_bas) <- c('Top','Bottom')
+
+mRNA_mat_bas
+
+mat_make_bas[1,1] <- cor(colMeans(prot_mat_bas[convert_set1$split_gene,],na.rm = T),
+     colMeans(prot_mat_bas[intersect(rownames(a2)[1:158],rownames(deg_mat_bas)),],na.rm = T),use = 'pairwise.complete.obs')
+
+mat_make_bas[2,1] <- cor(colMeans(prot_mat_bas[convert_set1$split_gene,],na.rm = T),
+     colMeans(prot_mat_bas[intersect(rownames(a2)[159:nrow(a2)],rownames(deg_mat_bas)),],na.rm = T),use = 'pairwise.complete.obs')
+
+mat_make_bas[1,2] <- cor(colMeans(prot_mat_bas[convert_set2$split_gene,],na.rm = T),
+     colMeans(prot_mat_bas[intersect(rownames(a2)[1:158],rownames(deg_mat_bas)),],na.rm = T),use = 'pairwise.complete.obs')
+
+cor.test(colMeans(mRNA_mat_bas[convert_set2$split_gene,],na.rm = T),
+         colMeans(mRNA_mat_bas[intersect(rownames(a2)[1:158],rownames(deg_mat_bas)),],na.rm = T))
+
+mat_make_bas[2,2] <- cor(colMeans(prot_mat_bas[convert_set2$split_gene,],na.rm = T),
+     colMeans(prot_mat_bas[intersect(rownames(a2)[159:nrow(a2)],rownames(deg_mat_bas)),],na.rm = T),use = 'pairwise.complete.obs')
+
+cor.test(colMeans(mRNA_mat_bas[convert_set2$split_gene,],na.rm = T),
+         colMeans(mRNA_mat_bas[intersect(rownames(a2)[159:nrow(a2)],rownames(deg_mat_bas)),],na.rm = T))
+
+
+
+heat_map_clust_avg(prot_mat_fib,'Fibroblast')
+heat_map_clust_avg(deg_mat_fib,'Fibroblast')
+heat_map_clust_avg(mRNA_mat_fib,'Fibroblast')
+
+heat_map_clust_avg(prot_mat_bas,'Basal')
+heat_map_clust_avg(mRNA_mat_bas,'Basal')
+heat_map_clust_avg(deg_mat_bas,'Basal')
 
 
 
 
 
 
+# ----- tiny helpers -----
+to_entrez <- function(sym) {
+  bitr(sym, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db) |>
+    distinct(ENTREZID) |>
+    pull(ENTREZID)
+}
 
-Heatmap(df_wtf[colnames(df_wtf)[diag(df_wtf) < .1],colnames(df_wtf)[diag(df_wtf) < .1]],cluster_rows = F)
+go_bp <- function(sym) {
+  enrichGO(gene = to_entrez(sym),
+           OrgDb = org.Mm.eg.db, keyType = "ENTREZID",
+           ont = "BP", pAdjustMethod = "BH",
+           pvalueCutoff = 1, qvalueCutoff = 1, readable = TRUE) |>
+    as.data.frame() |>
+    select(ID, Description, p.adjust, GeneRatio, Count) |>
+    arrange(p.adjust)
+}
 
-plot(cor_mat_bas_prot2['Acot2',df_cva$prot], cor_mat_fib_prot2['Cyb5r3',df_cva$prot],main = 'Cor = 0.60',
-     xlab = 'Krt5 correlations, Basal',ylab = 'Vim correlations, Fibroblast')
+# ----- run -----
+res_fib_BP <- go_bp(set_fib)
+res_bas_BP <- go_bp(set_bas)
 
-cor(cor_mat_bas_prot2['Acot2',df_cva$prot], cor_mat_fib_prot2['Acot2',df_cva$prot],use = 'pairwise.complete.obs')
+res_fib_BP_set1 <- go_bp(rownames(a2)[1:158])
+res_bas_BP_set1 <- go_bp(rownames(a2)[159:nrow(a2)])
 
-plot(cor_mat_bas_prot2['Acot2',df_cva$prot], cor_mat_fib_prot2['Acot2',df_cva$prot],main = 'Cor = 0.60',
-     xlab = 'Krt5 correlations, Basal',ylab = 'Vim correlations, Fibroblast')
+# view top terms
+head(res_fib_BP, 20)
+head(res_bas_BP, 20)
+head(res_fib_BP_set1, 20)
+head(res_bas_BP_set1, 20)
 
-library(ggplot2)
-library(dplyr)
 
-prot_vec <- df_cva$prot
 
-## 1) Basal: Acot2  vs  Fibroblast: Cyb5r3
-df1 <- tibble(
-  prot = prot_vec,
-  x = cor_mat_bas_prot2["Acot2", prot_vec],
-  y = cor_mat_fib_prot2["Cyb5r3", prot_vec]
-) %>% filter(is.finite(x), is.finite(y))
 
-r1 <- cor(df1$x, df1$y, use = "complete.obs")
+##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### 
+##### Fibroblast epithelial vim - krt5 comparison plots Fig5 pan a, b
+##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### 
 
-p1 <- ggplot(df1, aes(x = x, y = y)) +
-  geom_point(size = 2, alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE, linetype = "dashed") +
-  labs(
-    title = sprintf("Cor = %.2f", r1),
-    x = "Acot2 correlations, Basal",
-    y = "Cyb5r3 correlations, Fibroblast"
-  ) +
+
+prot_vec <- df_cva_good$prot
+
+## build one data-frame with the four scatter pairs ---------------------
+df_plot <- bind_rows(
+  tibble(
+    panel = "Basal Krt5  vs  Fib Vim",
+    x     = cor_mat_bas_prot2[prot_vec,"Krt5"],
+    y     = cor_mat_fib_prot2[prot_vec,"Vim"]
+  ),
+  tibble(
+    panel = "Basal Krt5  vs  Fib Krt5",
+    x     = cor_mat_bas_prot2[prot_vec,"Krt5"],
+    y     = cor_mat_fib_prot2[prot_vec,"Krt5"]
+  ),
+  tibble(
+    panel = "Basal Vim   vs  Fib Vim",
+    x     = cor_mat_bas_prot2[prot_vec,"Vim"],
+    y     = cor_mat_fib_prot2[prot_vec,"Vim"]
+  ),
+  tibble(
+    panel = "Basal Vim   vs  Fib Krt5",
+    x     = cor_mat_bas_prot2[prot_vec,"Vim"],
+    y     = cor_mat_fib_prot2[prot_vec,"Krt5"]
+  )
+)
+
+## compute correlation for subtitle (optional) --------------------------
+corr_tbl <- df_plot %>%
+  group_by(panel) %>%
+  summarise(r = cor(x, y, use = "pairwise.complete.obs")) %>%
+  mutate(label = sprintf("r = %.2f", r))
+
+## 2×2 facet plot --------------------------------------------------------
+ggplot(df_plot, aes(x = x, y = y)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  xlim(-.4,.6) + ylim(-.4,.6)+
+  facet_wrap(~ panel, ncol = 2) +
+  labs(x = "Basal correlation",
+       y = "Fibroblast correlation",
+       title = "") +
+  geom_text(data = corr_tbl, aes(x = -Inf, y = Inf, label = label),
+            hjust = -0.1, vjust = 1.2, size = 4, inherit.aes = FALSE) +
   theme_classic(base_size = 14)
-p1
 
-## 2) Basal: Acot2  vs  Fibroblast: Acot2
-df2 <- tibble(
-  prot = prot_vec,
-  x = cor_mat_bas_prot2["Acot2", prot_vec],
-  y = cor_mat_fib_prot2["Acot2", prot_vec]
-) %>% filter(is.finite(x), is.finite(y))
+ggplot(df_plot, aes(x = x, y = y)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  xlim(-0.4, 0.6) + ylim(-0.4, 0.6) +
+  facet_wrap(~ panel, ncol = 2) +
+  labs(x = "Basal correlation",
+       y = "Fibroblast correlation",
+       title = "") +
+  geom_text(data = corr_tbl, aes(x = -Inf, y = Inf, label = label),
+            hjust = -0.1, vjust = 1.2, size = 4, inherit.aes = FALSE) +
+  theme_classic(base_size = 14) +
+  theme(
+    strip.text = element_blank(),                       # remove facet headers
+    panel.border = element_rect(color = "black", fill = NA, size = 1),  # border
+    panel.spacing = unit(1, "lines"),                  # space between facets
+    axis.line = element_blank()                        # remove original x/y axis lines
+  )
 
-r2 <- cor(df2$x, df2$y, use = "complete.obs")
-
-p2 <- ggplot(df2, aes(x = x, y = y)) +
-  geom_point(size = 2, alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE, linetype = "dashed") +
-  labs(
-    title = sprintf("Cor = %.2f", r2),
-    x = "Acot2 correlations, Basal",
-    y = "Acot2 correlations, Fibroblast"
-  ) +
-  theme_classic(base_size = 14)
-p2
-
-
-
-plot(cor_mat_bas_prot2['Krt5',sect], cor_mat_fib_prot2['Vim',sect],main = 'Cor = 0.60',
-     xlab = 'Krt5 correlations, Basal',ylab = 'Vim correlations, Fibroblast')
-cor(cor_mat_bas_prot2['Krt5',sect], cor_mat_fib_prot2['Vim',sect],use = 'pairwise.complete.obs')
-
-
-plot(cor_mat_bas_prot2['Krt5',sect], cor_mat_fib_prot2['Krt5',sect],main = 'Cor = 0.60',
-     xlab = 'Krt5 correlations, Basal',ylab = 'Vim correlations, Fibroblast')
-cor(cor_mat_bas_prot2['Krt5',sect], cor_mat_fib_prot2['Krt5',sect],use = 'pairwise.complete.obs')
-
-plot(cor_mat_bas_prot2['Vim',sect], cor_mat_fib_prot2['Vim',sect],main = 'Cor = 0.60',
-     xlab = 'Krt5 correlations, Basal',ylab = 'Vim correlations, Fibroblast')
-cor(cor_mat_bas_prot2['Vim',sect], cor_mat_fib_prot2['Vim',sect],use = 'pairwise.complete.obs')
-
-
-df_plot_cor <- data.frame(Krt5 = cor_mat_bas_prot2['Krt5',sect],Vim = cor_mat_fib_prot2['Vim',sect])
-ggplot(df_plot_cor,aes(x = Krt5,y = Vim)) + geom_point() + theme_bw(base_size = 18) +
-  xlab('Krt5, Basal cell') + ylab('Vim, Fibroblasts') + ggtitle('Correlations to primary IF')
-
+df_plot_cor <- data.frame(Krt5 = cor_mat_bas_prot2['Krt5',],Vim = cor_mat_fib_prot2['Vim',])
 df_plot_cor <- df_plot_cor %>% filter(abs(Krt5) > .2)
-df_plot_cor <- df_plot_cor %>% filter(abs(Vim) > .2)
+df_plot_cor <- df_plot_cor %>% filter(abs(Vim) > .25)
 
 hm <- prot_mat_bas[c(rownames(df_plot_cor),'Krt5','Krt15'),] #'Aldh2','Cyp2f2','Cbr2','Pccb','Atp1b1'
 #hm <- mRNA_mat_basal[c(rownames(df_plot_cor),'Krt5','Krt15','Aldh2','Cyp2f2'),sample(ncol(mRNA_mat_basal),2000,)]
 
-hm <- hm[rowSums(is.na(hm)==F) > 1400,]
-hm <- hm[,colSums(is.na(hm)==F) > 30]
+hm <- hm[rowSums(is.na(hm)==F) > 1000,]
+hm <- hm[,colSums(is.na(hm)==F) > 35]
 
 dim(hm)
 
@@ -1723,30 +1962,41 @@ for(i in 1:nrow(hm)){
   hm[i,] <- hm[i,] - mean(hm[i,],na.rm=T)
 }
 
-Heatmap(hm,show_row_dend = F,show_column_dend = F,show_column_names = F)
+a <- Heatmap(hm,show_row_dend = F,show_column_dend = F,show_column_names = F)
 hm <- hm[row_order(a),]
 Heatmap(hm,show_row_dend = F,show_column_dend = F,show_column_names = F,cluster_rows = F)
 
-df_new1 <- df_new %>% filter(gene1 == 'O09172' | gene2 == 'O09172')
+rownames(hm)
 
-cor(prot_mat_basal['Krt5',],deg_mat_basal['Krt5',],use = 'pairwise.complete.obs')
+joint_anti <- c('Prdx6','Idh2','Aldh6a1','Cbr2','Hmgn2','Gstm2','Gsta3','Pccb') #''
+joint_pro <- c('Lmna','Anxa2','Anxa1','Ehd2','Cavin1','Cav1','Eif4a1','Tuba4a','Plec','Tagln2')
 
-plot(prot_mat_fib['Vim',],deg_mat_fib['Vim',]) # Sfn
-plot(prot_mat_fib['Vim',],prot_mat_fib['Rac1',])
+unique_anti_fib <- c()
+unique_pro_fib <- c('Vim','Dpysl2','Cyb5r3','Rtn4','Glud1','S100a10')
 
-hm <- prot_mat_fib[c(rownames(df_plot_cor),'Vim','Cyb5r3','Dpysl2','S100a4','Gsta4','Aldh1a1'),]
-hm <- hm[rownames(hm) != 'Crip2',]
+unique_anti_bas <- c('Sec14l2','Cbr2')
+unique_pro_bas <- c('Krt5','Krt15','Sfn')
+
+hm <- prot_mat_fib[c(unique_pro_fib,joint_pro,joint_anti,unique_anti_fib),]
 dim(hm)
-hm <- hm[rowSums(is.na(hm)==F) > 400,]
-hm <- hm[,colSums(is.na(hm)==F) > 30]
+hm <- hm[,colSums(is.na(hm)==F) > 15]
 dim(hm)
 
+hm <- prot_mat_bas[c(unique_pro_bas,joint_pro,joint_anti,unique_anti_bas),]
+dim(hm)
+hm <- hm[,colSums(is.na(hm)==F) > 15]
+dim(hm)
 
 for(i in 1:nrow(hm)){
   hm[i,] <- hm[i,] - mean(hm[i,],na.rm=T)
 }
 
-Heatmap(hm,show_row_dend = F,show_column_dend = F,show_column_names = F)
+
+a <- Heatmap(hm,show_row_dend = F,show_column_dend = F,show_column_names = F)
+hm <- hm[row_order(a),]
+Heatmap(hm,show_row_dend = F,show_column_dend = F,show_column_names = F,cluster_rows = F)
+
+Heatmap(cor(t(hm),use = 'pairwise.complete.obs'))
 
 comp <-c('Krt5',
          'Krt15',
@@ -1763,6 +2013,7 @@ comp <-c('Krt5',
          'Lmna','Vim','Des','S100a4','Lgals1','Tln1','Msn') 
 
 'Vimentin, desmin, Tgm2, Rab10 and Ywhaz'
+
 
 
 

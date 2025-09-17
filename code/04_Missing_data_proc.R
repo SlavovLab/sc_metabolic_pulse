@@ -17,8 +17,6 @@ library(seqinr)
 
 
 
-
-
 ##################
 # data path
 ##################
@@ -241,7 +239,7 @@ Proc_fasta <- function(path){
 }
 
 #########################
-# Functions for missingness classifier
+# Read in data
 #########################
 
 
@@ -250,6 +248,8 @@ load(paste0(path_dat,'03_QuantQC_objects/r1_5day_male.RData'))
 load(paste0(path_dat,'03_QuantQC_objects/r2_5day_female.RData'))
 load(paste0(path_dat,'03_QuantQC_objects/r3_10day_male.RData'))
 load(paste0(path_dat,'03_QuantQC_objects/r4_10day_female.RData'))
+
+
 
 
 # Load in the raw peptide data from each prep (this gets normalized in the QQC objects so is not stored)
@@ -392,7 +392,6 @@ model_data <- data
   data_conc <- out_dat2[[1]]
   data_miss <- out_dat2[[2]]
 
-  print('Regressing out techincal effects')
 
   data_conc <- data_conc %>% filter(is.na(predicted_p_obs) == F)
   data_miss <- data_miss %>% filter(is.na(predicted_p_obs) == F)
@@ -499,7 +498,7 @@ model_data <- data
   
 
   
-  #### Plot model difference protein specific way
+  #### Plot model difference for each protein, supp fig 2e
   
   diff_tech <- c()
   diff_Bio <- c()
@@ -523,7 +522,8 @@ model_data <- data
   df_learn$diff <- df_learn$diff_b -df_learn$diff_tech
   
   df_learn$prot <- factor(df_learn$prot, levels = df_learn$prot[order(df_learn$diff_tech)])
-
+  
+  
   df_learn <- df_learn %>% filter(ct == 'Smooth muscle')
 
   df_learn$diff_b <- df_learn$diff_b*100
@@ -550,7 +550,6 @@ model_data <- data
   data_miss_post_collapse1 <- data_miss_post %>% group_by(cell_type,Run,Protein) %>% summarise(diff=median(diff,na.rm=T))
   data_miss_post_collapse2 <- data_miss_post_collapse1 %>% group_by(cell_type,Protein) %>% summarise(diff=sum(diff,na.rm=T))
 
-  
   write.csv(data_miss_post_collapse2,paste0(path_dat,'04_Gene_X_SingleCell_and_annotations/Missingness_results.csv'))
 
 
@@ -644,8 +643,9 @@ model_data <- data
   data_degradation_model_input <- data_degradation_model_input %>% filter(Protein %in% get_prots_prot$Protein)
   nrow(data_degradation_model_input)
 
-
+  ######################################################
   ###### Curating RNA rates
+  ######################################################
   
   rna_seq <- readRDS('/Users/andrewleduc/Desktop/Senescense/seurat_integrated_filered_700_named.rds')
   
@@ -685,7 +685,9 @@ model_data <- data
 
   mrna_data <- list(mrna_mat_1,mrna_mat_2,mrna_mat_3,mrna_mat_4)
   names(mrna_data) <- unique(df_sep$Data_set)
-
+  
+  mrna_non_zero_values <- list(mrna_mat_1,mrna_mat_2,mrna_mat_3,mrna_mat_4)
+  
   count_mat <-as.matrix(rna_seq@assays$RNA@counts)
   for(i in 1:length(mRNA_CTs)){
 
@@ -698,7 +700,7 @@ model_data <- data
       s1 <- intersect(s1,df_sep_hold$id)
 
       mrna_data[[j]][,i] = (.1+ rowMeans(count_mat[,s1]))
-      
+      mrna_non_zero_values[[j]][,i] = rowSums(count_mat[,s1] !=0 )
 
     }
 
@@ -735,11 +737,10 @@ model_data <- data
   data_protein_model_input <- data_protein_model_input %>% filter(CT_prot %in% sect_CT_prot)
   data_degradation_model_input <- data_degradation_model_input %>% filter(CT_prot %in% sect_CT_prot)
 
-  length(unique(rna_dat$gene))
-  length(unique(data_protein_model_input$split_gene))
-  length(unique(data_degradation_model_input$split_gene))
   
-  
+  ######################################################
+  ###### writing final data for stan model
+  ######################################################
   
   all_genes     <- sort(unique(data_degradation_model_input$split_gene))
   all_celltypes <- sort(unique(data_degradation_model_input$Cell_Type))
@@ -791,246 +792,3 @@ model_data <- data
   
   
   
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-#########################
-  
-  
-  i='Pgk1'
-  data_degradation_plot <- data_degradation_model_input %>% filter(split_gene == i)
-  data_degradation_plot <- data_degradation_plot %>% group_by(Data_set,Peptide) %>%
-    mutate(value = value-mean(value,na.rm=T))
-  data_degradation_plot <- data_degradation_plot %>% filter(n_obs > 2)
-  ggplot(data_degradation_plot,aes(x = Cell_Type,y = value)) + geom_point() + ylim(c(-2,2))
-  data_degradation_plot <- data_degradation_plot %>% dplyr::select(cell_type,value)
-  data_degradation_plot$type = 'Deg'
-  
-  data_protein_plot <- data_protein_model_input %>% filter(split_gene == i)
-  data_protein_plot <- data_protein_plot %>% group_by(Data_set,Peptide) %>%
-    mutate(value = regressed_p_obs-mean(regressed_p_obs,na.rm=T))
-  data_protein_plot <- data_protein_plot %>% filter(n_obs > 2)
-  ggplot(data_protein_plot,aes(x = cell_type,y = regressed_p_obs)) + geom_point() + ylim(c(-2,2))
-  data_protein_plot$Cell_Type = data_protein_plot$cell_type
-  data_protein_plot <- data_protein_plot %>% dplyr::select(Cell_Type,value)
-  data_protein_plot$type = 'Abundance'
-  
-  
-  
-  ggplot(data_degradation_plot,aes(x = Cell_Type,y = value)) + geom_point() + ylim(c(-2,2))
-  rna_dat_plot <- rna_dat %>% filter(gene == i)
-  ggplot(rna_dat_plot,aes(x = Cell_type,y = value)) + geom_point() +  ylim(c(-2,2))
-  rna_dat_plot$Cell_Type <- rna_dat_plot$Cell_type
-  rna_dat_plot <- rna_dat_plot %>% dplyr::select(Cell_Type,value)
-  
-  
-  
-  plot(mRNA_mat[,],protein_mat[,])
-  plot(deg_mat[i,],protein_mat[i,])
-  plot(trans_mat[i,],protein_mat[i,])
-  
-  cor(mRNA_mat[i,],protein_mat[i,],use = 'pairwise.complete.obs')
-  cor(deg_mat[i,],protein_mat[i,],use = 'pairwise.complete.obs')
-  cor(trans_mat[i,],protein_mat[i,],use = 'pairwise.complete.obs')
-  
-  library(patchwork)
-  plot_gene_relationships('Nutf2')
-  
-  
-  
-  
-
-###################### For validating with other analysis pipeline
-
-  #Prot_mat_verify
-  data_miss_obs_test <-  data_protein_model_input2 %>%
-    group_by(cell_type, split_gene) %>%
-    summarise(
-      regressed_p_obs = sum(regressed_p_obs * n_obs, na.rm = TRUE) / sum(n_obs, na.rm = TRUE),
-      .groups = "drop"
-    )
-
-  data_miss_obs_test <- dcast(data_miss_obs_test,split_gene ~ cell_type, value.var = 'regressed_p_obs')
-  data_miss_obs_test <- data_miss_obs_test %>% filter(is.na(split_gene)==F)
-  rownames(data_miss_obs_test) <- data_miss_obs_test$split_gene
-  data_miss_obs_test$split_gene <- NULL
-  #data_miss_obs_test <- Normalize_reference_vector_log(data_miss_obs_test)
-  data_miss_obs_test <- as.matrix(data_miss_obs_test)
-  
-  #Deg_mat_verify
-  data_miss_obs_test_deg <-  data_degradation_model_input %>%
-    group_by(Cell_Type, split_gene) %>%
-    summarise(
-      regressed_p_obs = sum(value * n_obs, na.rm = TRUE) / sum(n_obs, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  data_miss_obs_test_deg <- dcast(data_miss_obs_test_deg,split_gene ~ Cell_Type, value.var = 'regressed_p_obs')
-  data_miss_obs_test_deg <- data_miss_obs_test_deg %>% filter(is.na(split_gene)==F)
-  rownames(data_miss_obs_test_deg) <- data_miss_obs_test_deg$split_gene
-  data_miss_obs_test_deg$Shwann <- NULL
-  data_miss_obs_test_deg$split_gene <- NULL
-  data_miss_obs_test_deg <- Normalize_reference_vector_log(data_miss_obs_test_deg)
-  data_miss_obs_test_deg <- as.matrix(data_miss_obs_test_deg)
-  
-  #RNA_mat verify
-  rna_dat_test  <-   rna_dat2 %>%
-    group_by(Cell_type, gene) %>%
-    summarise(
-      value = median(value, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  rna_dat_test <- dcast(rna_dat_test,gene ~ Cell_type, value.var = 'value')
-  rna_dat_test <- rna_dat_test %>% filter(is.na(gene)==F)
-  rownames(rna_dat_test) <- rna_dat_test$gene
-  rna_dat_test$gene <- NULL
-  rna_dat_test[is.na(data_miss_obs_test)] <- NA
-  rna_dat_test <- as.matrix(rna_dat_test)
-
-  
-  colnames(rna_dat_test) == colnames(data_miss_obs_test)
-  rownames(rna_dat_test) == rownames(data_miss_obs_test)
-  
-  plot(rna_dat_test,data_miss_obs_test)
-  abline(a = 0,b=1)
-  cor(c(rna_dat_test),c(data_miss_obs_test),use = 'pairwise.complete.obs',method = 'spearman')
-  
-  data_miss_obs_test_deg[rowSums(is.na(data_miss_obs_test_deg)==F) < 4 ,] <- NA
-  deg_mat[cor_store >.3 ,] <- NA
-  View(deg_mat)
-  cor_store
-  cor_mat <- cor(protein_mat,deg_mat,use = 'pairwise.complete.obs',method = 'pearson')
-  cor_store <- c()
-  slope_st <- c()
-  gene <- c()
-  for(i in 1:nrow(protein_mat)){
-    cor_store <- c(cor_store,cor(protein_mat[i,],deg_mat[i,],use = 'pairwise.complete.obs'))
-    if(sum(is.na(deg_mat[i,])==F)>3){
-      slope_st <- c(slope_st,TLS(deg_mat[i,],protein_mat[i,])[[1]])
-    }else{
-      slope_st <- c(slope_st,0)
-    }
-    
-    gene <- c(gene,rownames(protein_mat)[i])
-  }
-  
- df_make <- data.frame(gene = gene,cor=cor_store,slope = slope_st)
- df_make <- df_make %>% filter(is.na(cor_store)==F)
- df_make <- df_make %>% filter(cor < -.4)
- 
- View(df_make)
- 
- hist(log2(-df_make$slope))
- 
- plot(protein_mat['Psmd14',],deg_mat['Psmd14',])
- abline(a=0,b=-1)
-  
-  
-Heatmap(
-  cor_mat,
-  name = "corr",
-  cluster_rows = F,
-  cluster_columns = F,
-  col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red")),
-  cell_fun = function(j, i, x, y, width, height, fill) {
-    # i, j = row/column indices in cor_mat
-    # x, y = center coordinates of the cell
-    grid.text(
-      round(cor_mat[i, j], 2),  # round to 2 decimal places
-      x = x, y = y,
-      gp = gpar(fontsize = 10)
-    )
-  }
-)
-  
-
-
-plot_gene_relationships <- function(gene_name) {
-  # 1) Find the row index for this gene
-  if (!gene_name %in% rownames(mRNA_mat)) {
-    stop("Gene '", gene_name, "' not found in mRNA_mat rownames.")
-  }
-  i <- match(gene_name, rownames(mRNA_mat))
-  
-  # 2) Build a small data.frame for plotting
-  df <- data.frame(
-    cell_type = colnames(mRNA_mat),
-    mRNA      = as.numeric(mRNA_mat[i, ]),
-    protein   = as.numeric(protein_mat[i, ]),
-    deg       = as.numeric(deg_mat[i, ]),
-    trans     = as.numeric(trans_mat[i, ])
-  )
-  
-  # 3) Create the three scatterplots
-  p1 <- ggplot(df, aes(x = mRNA, y = protein)) +
-    geom_point() +
-    theme_classic() +
-    labs(
-      title = paste0("mRNA vs Protein"),
-      x     = "log2 mRNA (fold-change)",
-      y     = "log2 Protein (fold-change)"
-    )
-  
-  p2 <- ggplot(df, aes(x = deg, y = protein)) +
-    geom_point() + ylab('')+
-    theme_classic() +
-    labs(
-      title = paste0("Degradation vs Protein"),
-      x     = "log2 Degradation rate"
-    )
-  
-  p3 <- ggplot(df, aes(x = trans, y = protein)) +
-    geom_point() +ylab('')+
-    theme_classic() +
-    labs(
-      title = paste0("Translation vs Protein"),
-      x     = "log2 Translation rate"
-    )
-  
-  # 4) Stack vertically
-  combined <- p1 + p2 + p3 +
-    plot_layout(ncol = 3) &
-    plot_annotation(
-      title = paste("Gene:", gene_name),
-      theme = theme(
-        plot.title = element_text(face = "bold", size = 16, hjust = 0.5)
-      )
-    )
-  
-  return(combined)
-}
-  
-  
-  
-  
-
-  
-  
-  
-  
-  
-  
-  
-  
-  
-
