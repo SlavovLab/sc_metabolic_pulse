@@ -1,4 +1,4 @@
-# Single cell quantification of protein regulation in primary tissue
+# Protein abundance regulation across single cells in a mammalian tissue
 
 
 * [Project Website](https://decode.slavovlab.net) &nbsp; 
