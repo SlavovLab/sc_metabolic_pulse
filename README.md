@@ -2,7 +2,7 @@
 
 
 * [Project Website](https://scp.slavovlab.net/Leduc_et_al_2025) &nbsp; 
-* [Preprint article](https://www.biorxiv.org/content/10.1101/2025.09.17.676955v1.full))
+* [Preprint article](https://www.biorxiv.org/content/10.1101/2025.09.17.676955v1.full)
 
 The code in this repository was used to quantify the regulation of protein abundance via transcription, translation, and protein clearance across cell types and single cells via integrated analysis of single cell in vivo metabolic pulse proteomics and singel cell mRNA sequencing. 
 
