@@ -1,15 +1,15 @@
 # Protein abundance regulation across single cells in a mammalian tissue
 
 
-* [Project Website](https://decode.slavovlab.net) &nbsp; 
-* [Preprint article](https://doi.org/10.1101/2024.08.26.609665)
+* [Project Website](https://scp.slavovlab.net/Leduc_et_al_2025) &nbsp; 
+* [Preprint article](https://www.biorxiv.org/content/10.1101/2025.09.17.676955v1.full))
 
 The code in this repository was used to quantify the regulation of protein abundance via transcription, translation, and protein clearance across cell types and single cells via integrated analysis of single cell in vivo metabolic pulse proteomics and singel cell mRNA sequencing. 
 
 
 ## Processed data availible via Zenodo
 
-Outputs from each stage of analysis and processed gene by single cell and cell type specific data matricies for each modality are located in the "dat" folder on [zenodo](google.com). A summary of the folder's contents can be found also on [zenodo](google.com).
+Outputs from each stage of analysis and processed gene by single cell and cell type specific data matricies for each modality are located in the "dat" folder on [zenodo](https://zenodo.org/records/14902834). A summary of the folder's contents can be found also on [zenodo](https://zenodo.org/records/14902834).
 
 ## Reproducing analysis
 
@@ -52,7 +52,7 @@ Outputs from each stage of analysis and processed gene by single cell and cell t
 3. Download the DIANN processed raw data from the "searched" section of MassIVE [MSV000093494](https://massive.ucsd.edu/ProteoSAFe/dataset.jsp?task=ac44b779d8a04ca285a263616796c3b8). Unzip and add the contents to the "raw_data" folder.
 
 
-4. Preprocessing of the single cell data requires installing the QuantQC R package. For instructions installing go [here](google.com). 
+4. Preprocessing of the single cell data requires installing the QuantQC R package. For instructions installing go [here](https://scp.slavovlab.net/QuantQC). 
 
 
 5. Run Scripts in order starting with 4 individual preprocessing scripts in folder 01 and save data outputs throughout each script
