@@ -9,7 +9,7 @@ The code in this repository was used to quantify the regulation of protein abund
 
 ## Processed data availible via Zenodo
 
-Outputs from each stage of analysis and processed gene by single cell and cell type specific data matricies for each modality are located in the "dat" folder on [zenodo](https://zenodo.org/records/14902834). A summary of the folder's contents can be found also on [zenodo](https://zenodo.org/records/14902834).
+Outputs from each stage of analysis and processed gene by single cell and cell type specific data matricies for each modality are located in the "dat" folder on [zenodo](https://zenodo.org/records/14902834). A summary of the folder's contents can be found also on [zenodo]([https://zenodo.org/records/14902834](https://massive.ucsd.edu/ProteoSAFe/dataset.jsp?task=4b22e2f4fcde424daf16857507045a4c).
 
 ## Reproducing analysis
 
